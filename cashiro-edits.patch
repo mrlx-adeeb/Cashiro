@@ -1,0 +1,4018 @@
+diff --git a/.github/workflows/build-debug-apk.yml b/.github/workflows/build-debug-apk.yml
+new file mode 100644
+index 0000000..e4f34e6
+--- /dev/null
++++ b/.github/workflows/build-debug-apk.yml
+@@ -0,0 +1,75 @@
++# Build a debug APK of this edited Cashiro copy in the cloud.
++#
++# Why this exists: the local Gradle build in this sandbox fails before it
++# starts ("Could not receive a message from the daemon" — see build.log).
++# The daemon cannot run here, and there is no cached Gradle dependency
++# set, so a local build would have to download everything first.
++# GitHub Actions runs the same Gradle build on ubuntu-latest, where the
++# daemon works. A *debug* APK needs no keystore or secrets — Gradle signs
++# it automatically — so this workflow needs no setup beyond pushing the
++# code to a repo and pressing Run.
++#
++# How to use it:
++#   1. Put this working copy into a GitHub repo (fork or new repo).
++#   2. On GitHub: Actions tab -> "Build debug APK" -> Run workflow.
++#   3. When it finishes green, download "cashiro-debug-apk" from the
++#      run's Artifacts section and install the APK on the phone.
++#      (A debug APK installs fine alongside nothing else; uninstall any
++#      Play Store / original Cashiro first if the install complains about
++#      a conflicting signature — it is signed with a different key.)
++#
++# The workflow also strips the sandbox-only proxy lines
++# (hatch-egress-proxy) from gradle.properties before building, because
++# that proxy does not exist outside this sandbox and would break
++# dependency downloads on the runner.
++
++name: Build debug APK
++
++on:
++  workflow_dispatch:
++
++jobs:
++  build-debug-apk:
++    runs-on: ubuntu-latest
++    timeout-minutes: 30
++
++    steps:
++      - name: Checkout code
++        uses: actions/checkout@v4
++
++      - name: Set up JDK 17
++        uses: actions/setup-java@v4
++        with:
++          java-version: '17'
++          distribution: 'temurin'
++
++      - name: Setup Android SDK
++        uses: android-actions/setup-android@v3
++
++      - name: Cache Gradle packages
++        uses: actions/cache@v4
++        with:
++          path: |
++            ~/.gradle/caches
++            ~/.gradle/wrapper
++          key: ${{ runner.os }}-gradle-${{ hashFiles('**/*.gradle*', '**/gradle-wrapper.properties') }}
++          restore-keys: |
++            ${{ runner.os }}-gradle-
++
++      - name: Grant execute permission for gradlew
++        run: chmod +x gradlew
++
++      - name: Remove sandbox-only proxy settings
++        run: sed -i '/hatch-egress-proxy/d' gradle.properties
++
++      - name: Build debug APK
++        env:
++          GRADLE_OPTS: -Dorg.gradle.jvmargs="-Xmx6G"
++        run: ./gradlew assembleStandardDebug --no-daemon
++
++      - name: Upload debug APK
++        uses: actions/upload-artifact@v4
++        with:
++          name: cashiro-debug-apk
++          path: app/build/outputs/apk/standard/debug/*.apk
++          retention-days: 7
+diff --git a/BUILD_ON_PHONE.txt b/BUILD_ON_PHONE.txt
+new file mode 100644
+index 0000000..115d529
+--- /dev/null
++++ b/BUILD_ON_PHONE.txt
+@@ -0,0 +1,39 @@
++BUILD CASHIRO ON YOUR PHONE (no PC needed)
++==========================================
++App to use: AndroidIDE (free) - it builds real Android apps on the phone itself.
++
++1. Install AndroidIDE
++   - Open: https://github.com/AndroidIDEOfficial/AndroidIDE/releases
++   - Download the latest .apk (arm64) and install it (allow "install unknown apps" if asked).
++
++2. First open
++   - AndroidIDE will ask to install its SDK/JDK - allow it, keep the phone on Wi-Fi.
++     This is a big one-time download. Let it finish fully.
++
++3. Get the project on the phone
++   - Download Cashiro-phone-build.zip (sent by Muse in chat) to Downloads.
++   - Extract it (Files app > zip > Extract). You get a folder: Cashiro-phone
++
++4. Open the project
++   - AndroidIDE > Open Project > choose the Cashiro-phone folder.
++   - Wait for Gradle sync to finish (first time downloads many libraries - Wi-Fi + patience).
++
++5. Build a DEBUG APK first (simplest - no keystore setup)
++   - Menu / Run: Gradle tasks > app > assembleStandardDebug
++   - Or use the Run/build button and pick the "standardDebug" variant if asked.
++   - First build can take 20-45 min on a phone. Keep the screen on / plug in the charger.
++   - Close other apps before building - this is a heavy project.
++
++6. Install your APK
++   - When the build succeeds, the APK is at:
++     Cashiro-phone/app/build/outputs/apk/standard/debug/
++   - Tap the .apk file and install it.
++   - NOTE: debug builds are signed with a test key, so if the Play Store / GitHub
++     version of Cashiro is already installed, uninstall that first (export a backup
++     of your data inside Cashiro before uninstalling!).
++
++Notes
++- This copy already has: SMS tracking removed, delete-expense balance bug fixed,
++  category deletion unlocked, Cashiro AI removed, R8 optimisation set for release.
++- local.properties was intentionally removed - AndroidIDE creates its own.
++- If sync/build fails, screenshot the red error in AndroidIDE and send it to Muse.
+diff --git a/app/build.gradle.kts b/app/build.gradle.kts
+index 6e31470..ead2de9 100644
+--- a/app/build.gradle.kts
++++ b/app/build.gradle.kts
+@@ -1,268 +1,268 @@
+-import java.util.Properties
+-import org.jetbrains.kotlin.gradle.dsl.JvmTarget
+-
+-
+-plugins {
+-    alias(libs.plugins.android.application)
+-    alias(libs.plugins.kotlin.android)
+-    alias(libs.plugins.kotlin.compose)
+-    id("com.google.devtools.ksp")
+-    id("com.google.dagger.hilt.android")
+-    id("org.jetbrains.kotlin.plugin.serialization") version "2.3.0"
+-}
+-
+-android {
+-    namespace = "com.ritesh.cashiro"
+-    compileSdk = 36
+-    
+-    buildFeatures {
+-        buildConfig = true
+-    }
+-    defaultConfig {
+-        applicationId = "com.ritesh.cashiro"
+-        minSdk = 26
+-        targetSdk = 36
+-        versionCode = 94
+-        versionName = "2.1.61-beta"
+-
+-        testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
+-        
+-        // Load RSA public key from local.properties
+-        val localPropertiesFile = rootProject.file("local.properties")
+-        if (localPropertiesFile.exists()) {
+-            val localProperties = Properties()
+-            localProperties.load(localPropertiesFile.inputStream())
+-            
+-            val rsaPublicKey = localProperties.getProperty("RSA_PUBLIC_KEY", "")
+-            buildConfigField("String", "RSA_PUBLIC_KEY", "\"$rsaPublicKey\"")
+-        } else {
+-            // Fallback empty key for CI/CD builds
+-            buildConfigField("String", "RSA_PUBLIC_KEY", "\"\"")
+-        }
+-        
+-
+-    }
+-
+-
+-    signingConfigs {
+-        create("release") {
+-            // Default to values from local.properties if available
+-            val localPropertiesFile = rootProject.file("local.properties")
+-            if (localPropertiesFile.exists()) {
+-                val localProperties = Properties()
+-                localProperties.load(localPropertiesFile.inputStream())
+-                
+-                val keystorePath = localProperties.getProperty("RELEASE_STORE_FILE", "")
+-                if (keystorePath.isNotEmpty()) {
+-                    storeFile = file(keystorePath)
+-                    storePassword = localProperties.getProperty("RELEASE_STORE_PASSWORD", "")
+-                    keyAlias = localProperties.getProperty("RELEASE_KEY_ALIAS", "")
+-                    keyPassword = localProperties.getProperty("RELEASE_KEY_PASSWORD", "")
+-                }
+-            }
+-        }
+-    }
+-    
+-    flavorDimensions += "version"
+-    productFlavors {
+-        create("fdroid") {
+-            dimension = "version"
+-            // F-Droid builds will use their own signing
+-        }
+-        create("standard") {
+-            dimension = "version"
+-            isDefault = true
+-            // Standard flavor includes all architectures (including x86 for emulators)
+-        }
+-    }
+-
+-    splits {
+-        abi {
+-            // Disable splits for bundle builds (AABs) and fdroid flavor builds.
+-            // F-Droid expects exactly one APK output — splits cause the build to fail.
+-            //noinspection WrongGradleMethod
+-            val runTasks = gradle.startParameter.taskNames.map { it.lowercase() }
+-            //noinspection WrongGradleMethod
+-            val isBundleBuild = runTasks.any { it.contains("bundle") }
+-            //noinspection WrongGradleMethod
+-            val isFdroidBuild = runTasks.any { it.contains("fdroid") }
+-
+-            isEnable = !isBundleBuild && !isFdroidBuild
+-
+-            reset()
+-            include("arm64-v8a", "armeabi-v7a", "x86", "x86_64")
+-            isUniversalApk = true
+-        }
+-    }
+-
+-
+-    buildTypes {
+-        release {
+-            isMinifyEnabled = true
+-            isShrinkResources = true
+-            proguardFiles(
+-                getDefaultProguardFile("proguard-android-optimize.txt"),
+-                "proguard-rules.pro"
+-            )
+-            signingConfig = signingConfigs.getByName("release")
+-            
+-            // Include debug symbols for native crashes
+-            ndk {
+-                debugSymbolLevel = "SYMBOL_TABLE"
+-            }
+-        }
+-    }
+-    compileOptions {
+-        sourceCompatibility = JavaVersion.VERSION_11
+-        targetCompatibility = JavaVersion.VERSION_11
+-    }
+-
+-    kotlin
+-    kotlin {
+-        compilerOptions {
+-            jvmTarget.set(JvmTarget.JVM_11)
+-            freeCompilerArgs.add("-Xannotation-default-target=param-property")
+-        }
+-    }
+-
+-    buildFeatures {
+-        compose = true
+-    }
+-
+-    dependenciesInfo {
+-        // Disables dependency metadata when building APKs.
+-        includeInApk = false
+-        // Disables dependency metadata when building Android App Bundles.
+-        includeInBundle = false
+-    }
+-
+-    testOptions {
+-        unitTests.isReturnDefaultValues = true
+-    }
+-}
+-
+-
+-// Configure Room schema export
+-ksp {
+-    arg("room.schemaLocation", "$projectDir/schemas")
+-    arg("room.incremental", "true")
+-    arg("room.generateKotlin", "true")
+-}
+-
+-dependencies {
+-    implementation(libs.androidx.compose.animation)
+-
+-    // Local modules
+-    implementation(project(":parser-core"))
+-    implementation(libs.androidx.compose.material3)
+-
+-    implementation(libs.androidx.core.ktx)
+-    implementation(libs.androidx.appcompat)
+-    implementation(libs.androidx.lifecycle.runtime.ktx)
+-    implementation(libs.androidx.activity.compose)
+-    implementation(platform(libs.androidx.compose.bom))
+-    implementation(libs.androidx.ui)
+-    implementation(libs.androidx.ui.graphics)
+-    implementation(libs.androidx.ui.tooling.preview)
+-    implementation(libs.androidx.material3)
+-    implementation(libs.androidx.compose.material.icons.extended)
+-    
+-    // Color Picker for Compose
+-    implementation(libs.colorpicker.compose)
+-    implementation(libs.haze)
+-    
+-    // Splash Screen API
+-    implementation(libs.androidx.core.splashscreen)
+-    
+-    // Lifecycle and ViewModel
+-    implementation(libs.androidx.lifecycle.viewmodel.compose)
+-    implementation(libs.androidx.lifecycle.runtime.compose)
+-
+-    // Navigation
+-    implementation(libs.androidx.hilt.navigation.compose)
+-    implementation(libs.androidx.navigation.compose)
+-    
+-    // Kotlin Serialization
+-    implementation(libs.kotlinx.serialization.json)
+-
+-    // Ktor for HTTP requests
+-    implementation(libs.ktor.client.core)
+-    implementation(libs.ktor.client.android)
+-    implementation(libs.ktor.client.content.negotiation)
+-    implementation(libs.ktor.serialization.kotlinx.json)
+-    
+-    // Gson for backup/restore
+-    implementation(libs.gson)
+-    
+-    // DataStore
+-    implementation(libs.androidx.datastore.preferences)
+-
+-    // Biometric Authentication
+-    implementation(libs.androidx.biometric)
+-    implementation(libs.androidx.security.crypto)
+-    implementation(libs.play.services.auth)
+-
+-    // Hilt
+-    implementation(libs.hilt.android)
+-    ksp(libs.hilt.android.compiler)
+-    implementation(libs.androidx.hilt.navigation.compose)
+-    
+-    // Room
+-    implementation(libs.androidx.room.runtime)
+-    implementation(libs.androidx.room.ktx)
+-    ksp(libs.androidx.room.compiler)
+-    
+-    // WorkManager
+-    implementation(libs.androidx.work.runtime.ktx)
+-    
+-    // Hilt WorkManager integration
+-    implementation(libs.androidx.hilt.work)
+-    ksp(libs.androidx.hilt.compiler)
+-    
+-    // LiteRT-LM for on-device LLM inference
+-    implementation(libs.litertlm.android)
+-
+-    
+-    // Google Play In-App Updates (only for standard flavor)
+-    "standardImplementation"(libs.app.update)
+-    "standardImplementation"(libs.app.update.ktx)
+-    
+-    // Google Play In-App Reviews (only for standard flavor)
+-    "standardImplementation"(libs.review)
+-    "standardImplementation"(libs.review.ktx)
+-    
+-    testImplementation(libs.junit)
+-    testImplementation(libs.androidx.room.testing)
+-    testImplementation(libs.ktor.client.mock)
+-    testImplementation(libs.kotlinx.coroutines.test)
+-    androidTestImplementation(libs.androidx.work.testing)
+-    androidTestImplementation(libs.androidx.junit)
+-    androidTestImplementation(libs.androidx.espresso.core)
+-    androidTestImplementation(platform(libs.androidx.compose.bom))
+-    androidTestImplementation(libs.androidx.ui.test.junit4)
+-    implementation(libs.androidx.ui.tooling)
+-    debugImplementation(libs.androidx.ui.test.manifest)
+-    
+-    // Markdown support
+-    implementation(libs.markdown)
+-    implementation(libs.mikepenz.markdown.renderer)
+-    implementation(libs.mikepenz.markdown.renderer.m3)
+-    
+-    // OpenCSV for CSV export
+-    implementation(libs.opencsv)
+-    testImplementation(kotlin("test"))
+-
+-    // coil for images and GIF
+-    implementation(libs.coil.compose)
+-    implementation(libs.coil.network.okhttp)
+-    implementation(libs.coil.gif)
+-
+-    // Compose Charts
+-    implementation(libs.compose.charts)
+-
+-    // Reorderable
+-    implementation(libs.reorderable)
+-
+-    // PDF Box for Android
+-    implementation(libs.pdfbox.android)
+-}
++import java.util.Properties
++import org.jetbrains.kotlin.gradle.dsl.JvmTarget
++
++
++plugins {
++    alias(libs.plugins.android.application)
++    alias(libs.plugins.kotlin.android)
++    alias(libs.plugins.kotlin.compose)
++    id("com.google.devtools.ksp")
++    id("com.google.dagger.hilt.android")
++    id("org.jetbrains.kotlin.plugin.serialization") version "2.3.0"
++}
++
++android {
++    namespace = "com.ritesh.cashiro"
++    compileSdk = 36
++    
++    buildFeatures {
++        buildConfig = true
++    }
++    defaultConfig {
++        applicationId = "com.ritesh.cashiro"
++        minSdk = 26
++        targetSdk = 36
++        versionCode = 94
++        versionName = "2.1.61-beta"
++
++        testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
++        
++        // Load RSA public key from local.properties
++        val localPropertiesFile = rootProject.file("local.properties")
++        if (localPropertiesFile.exists()) {
++            val localProperties = Properties()
++            localProperties.load(localPropertiesFile.inputStream())
++            
++            val rsaPublicKey = localProperties.getProperty("RSA_PUBLIC_KEY", "")
++            buildConfigField("String", "RSA_PUBLIC_KEY", "\"$rsaPublicKey\"")
++        } else {
++            // Fallback empty key for CI/CD builds
++            buildConfigField("String", "RSA_PUBLIC_KEY", "\"\"")
++        }
++        
++
++    }
++
++
++    signingConfigs {
++        create("release") {
++            // Default to values from local.properties if available
++            val localPropertiesFile = rootProject.file("local.properties")
++            if (localPropertiesFile.exists()) {
++                val localProperties = Properties()
++                localProperties.load(localPropertiesFile.inputStream())
++                
++                val keystorePath = localProperties.getProperty("RELEASE_STORE_FILE", "")
++                if (keystorePath.isNotEmpty()) {
++                    storeFile = file(keystorePath)
++                    storePassword = localProperties.getProperty("RELEASE_STORE_PASSWORD", "")
++                    keyAlias = localProperties.getProperty("RELEASE_KEY_ALIAS", "")
++                    keyPassword = localProperties.getProperty("RELEASE_KEY_PASSWORD", "")
++                }
++            }
++        }
++    }
++    
++    flavorDimensions += "version"
++    productFlavors {
++        create("fdroid") {
++            dimension = "version"
++            // F-Droid builds will use their own signing
++        }
++        create("standard") {
++            dimension = "version"
++            isDefault = true
++            // Standard flavor includes all architectures (including x86 for emulators)
++        }
++    }
++
++    splits {
++        abi {
++            // Disable splits for bundle builds (AABs) and fdroid flavor builds.
++            // F-Droid expects exactly one APK output — splits cause the build to fail.
++            //noinspection WrongGradleMethod
++            val runTasks = gradle.startParameter.taskNames.map { it.lowercase() }
++            //noinspection WrongGradleMethod
++            val isBundleBuild = runTasks.any { it.contains("bundle") }
++            //noinspection WrongGradleMethod
++            val isFdroidBuild = runTasks.any { it.contains("fdroid") }
++
++            isEnable = !isBundleBuild && !isFdroidBuild
++
++            reset()
++            include("arm64-v8a", "armeabi-v7a", "x86", "x86_64")
++            isUniversalApk = true
++        }
++    }
++
++
++    buildTypes {
++        release {
++            isMinifyEnabled = true
++            isShrinkResources = true
++            proguardFiles(
++                getDefaultProguardFile("proguard-android-optimize.txt"),
++                "proguard-rules.pro"
++            )
++            signingConfig = signingConfigs.getByName("release")
++            
++            // Include debug symbols for native crashes
++            ndk {
++                debugSymbolLevel = "SYMBOL_TABLE"
++            }
++        }
++    }
++    compileOptions {
++        sourceCompatibility = JavaVersion.VERSION_11
++        targetCompatibility = JavaVersion.VERSION_11
++    }
++
++    kotlin
++    kotlin {
++        compilerOptions {
++            jvmTarget.set(JvmTarget.JVM_11)
++            freeCompilerArgs.add("-Xannotation-default-target=param-property")
++        }
++    }
++
++    buildFeatures {
++        compose = true
++    }
++
++    dependenciesInfo {
++        // Disables dependency metadata when building APKs.
++        includeInApk = false
++        // Disables dependency metadata when building Android App Bundles.
++        includeInBundle = false
++    }
++
++    testOptions {
++        unitTests.isReturnDefaultValues = true
++    }
++}
++
++
++// Configure Room schema export
++ksp {
++    arg("room.schemaLocation", "$projectDir/schemas")
++    arg("room.incremental", "true")
++    arg("room.generateKotlin", "true")
++}
++
++dependencies {
++    implementation(libs.androidx.compose.animation)
++
++    // Local modules
++    implementation(project(":parser-core"))
++    implementation(libs.androidx.compose.material3)
++
++    implementation(libs.androidx.core.ktx)
++    implementation(libs.androidx.appcompat)
++    implementation(libs.androidx.lifecycle.runtime.ktx)
++    implementation(libs.androidx.activity.compose)
++    implementation(platform(libs.androidx.compose.bom))
++    implementation(libs.androidx.ui)
++    implementation(libs.androidx.ui.graphics)
++    implementation(libs.androidx.ui.tooling.preview)
++    implementation(libs.androidx.material3)
++    implementation(libs.androidx.compose.material.icons.extended)
++    
++    // Color Picker for Compose
++    implementation(libs.colorpicker.compose)
++    implementation(libs.haze)
++    
++    // Splash Screen API
++    implementation(libs.androidx.core.splashscreen)
++    
++    // Lifecycle and ViewModel
++    implementation(libs.androidx.lifecycle.viewmodel.compose)
++    implementation(libs.androidx.lifecycle.runtime.compose)
++
++    // Navigation
++    implementation(libs.androidx.hilt.navigation.compose)
++    implementation(libs.androidx.navigation.compose)
++    
++    // Kotlin Serialization
++    implementation(libs.kotlinx.serialization.json)
++
++    // Ktor for HTTP requests
++    implementation(libs.ktor.client.core)
++    implementation(libs.ktor.client.android)
++    implementation(libs.ktor.client.content.negotiation)
++    implementation(libs.ktor.serialization.kotlinx.json)
++    
++    // Gson for backup/restore
++    implementation(libs.gson)
++    
++    // DataStore
++    implementation(libs.androidx.datastore.preferences)
++
++    // Biometric Authentication
++    implementation(libs.androidx.biometric)
++    implementation(libs.androidx.security.crypto)
++    implementation(libs.play.services.auth)
++
++    // Hilt
++    implementation(libs.hilt.android)
++    ksp(libs.hilt.android.compiler)
++    implementation(libs.androidx.hilt.navigation.compose)
++    
++    // Room
++    implementation(libs.androidx.room.runtime)
++    implementation(libs.androidx.room.ktx)
++    ksp(libs.androidx.room.compiler)
++    
++    // WorkManager
++    implementation(libs.androidx.work.runtime.ktx)
++    
++    // Hilt WorkManager integration
++    implementation(libs.androidx.hilt.work)
++    ksp(libs.androidx.hilt.compiler)
++    
++    // LiteRT-LM for on-device LLM inference
++    // LiteRT-LM (AI) dependency removed in this build: Cashiro AI removed
++
++    
++    // Google Play In-App Updates (only for standard flavor)
++    "standardImplementation"(libs.app.update)
++    "standardImplementation"(libs.app.update.ktx)
++    
++    // Google Play In-App Reviews (only for standard flavor)
++    "standardImplementation"(libs.review)
++    "standardImplementation"(libs.review.ktx)
++    
++    testImplementation(libs.junit)
++    testImplementation(libs.androidx.room.testing)
++    testImplementation(libs.ktor.client.mock)
++    testImplementation(libs.kotlinx.coroutines.test)
++    androidTestImplementation(libs.androidx.work.testing)
++    androidTestImplementation(libs.androidx.junit)
++    androidTestImplementation(libs.androidx.espresso.core)
++    androidTestImplementation(platform(libs.androidx.compose.bom))
++    androidTestImplementation(libs.androidx.ui.test.junit4)
++    implementation(libs.androidx.ui.tooling)
++    debugImplementation(libs.androidx.ui.test.manifest)
++    
++    // Markdown support
++    implementation(libs.markdown)
++    implementation(libs.mikepenz.markdown.renderer)
++    implementation(libs.mikepenz.markdown.renderer.m3)
++    
++    // OpenCSV for CSV export
++    implementation(libs.opencsv)
++    testImplementation(kotlin("test"))
++
++    // coil for images and GIF
++    implementation(libs.coil.compose)
++    implementation(libs.coil.network.okhttp)
++    implementation(libs.coil.gif)
++
++    // Compose Charts
++    implementation(libs.compose.charts)
++
++    // Reorderable
++    implementation(libs.reorderable)
++
++    // PDF Box for Android
++    implementation(libs.pdfbox.android)
++}
+diff --git a/app/src/main/AndroidManifest.xml b/app/src/main/AndroidManifest.xml
+index b6502ec..6ab53d5 100644
+--- a/app/src/main/AndroidManifest.xml
++++ b/app/src/main/AndroidManifest.xml
+@@ -2,9 +2,8 @@
+ <manifest xmlns:android="http://schemas.android.com/apk/res/android"
+     xmlns:tools="http://schemas.android.com/tools">
+ 
+-    <!-- SMS Permissions for reading and receiving transaction messages -->
+-    <uses-permission android:name="android.permission.READ_SMS" />
+-    <uses-permission android:name="android.permission.RECEIVE_SMS" />
++    <!-- SMS tracking removed (manual-entry build): no READ_SMS / RECEIVE_SMS permission,
++         so the app cannot read or receive SMS at OS level. -->
+ 
+     <!-- Notification permission for Android 13+ -->
+     <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
+@@ -164,15 +163,7 @@
+                 android:resource="@xml/file_paths" />
+         </provider>
+ 
+-        <!-- SMS BroadcastReceiver for real-time transaction processing -->
+-        <receiver
+-            android:name=".receiver.SmsBroadcastReceiver"
+-            android:exported="true"
+-            android:permission="android.permission.BROADCAST_SMS">
+-            <intent-filter android:priority="999">
+-                <action android:name="android.provider.Telephony.SMS_RECEIVED" />
+-            </intent-filter>
+-        </receiver>
++        <!-- SMS BroadcastReceiver removed (manual-entry build). -->
+ 
+         <!-- Notification Action Receiver for handling notification button actions -->
+         <receiver
+diff --git a/app/src/main/java/com/ritesh/cashiro/MainActivity.kt b/app/src/main/java/com/ritesh/cashiro/MainActivity.kt
+index 625c375..7f5a2b4 100644
+--- a/app/src/main/java/com/ritesh/cashiro/MainActivity.kt
++++ b/app/src/main/java/com/ritesh/cashiro/MainActivity.kt
+@@ -22,7 +22,6 @@ import com.ritesh.cashiro.presentation.ui.features.add.AddViewModel
+ import com.ritesh.cashiro.presentation.ui.features.analytics.AnalyticsViewModel
+ import com.ritesh.cashiro.presentation.ui.features.budgets.BudgetViewModel
+ import com.ritesh.cashiro.presentation.ui.features.categories.CategoriesViewModel
+-import com.ritesh.cashiro.presentation.ui.features.chat.ChatViewModel
+ import com.ritesh.cashiro.presentation.ui.features.home.HomeViewModel
+ import com.ritesh.cashiro.presentation.ui.features.onboarding.OnBoardingViewModel
+ import com.ritesh.cashiro.presentation.ui.features.profile.ProfileViewModel
+diff --git a/app/src/main/java/com/ritesh/cashiro/data/database/dao/AccountBalanceDao.kt b/app/src/main/java/com/ritesh/cashiro/data/database/dao/AccountBalanceDao.kt
+index 40606e3..6a7897d 100644
+--- a/app/src/main/java/com/ritesh/cashiro/data/database/dao/AccountBalanceDao.kt
++++ b/app/src/main/java/com/ritesh/cashiro/data/database/dao/AccountBalanceDao.kt
+@@ -387,6 +387,9 @@ abstract class AccountBalanceDao {
+     @Query("SELECT * FROM account_balances WHERE transaction_id = :transactionId LIMIT 1")
+     abstract suspend fun getBalanceByTransactionId(transactionId: Long): AccountBalanceEntity?
+ 
++    @Query("SELECT * FROM account_balances WHERE transaction_id = :transactionId")
++    abstract suspend fun getBalancesByTransactionId(transactionId: Long): List<AccountBalanceEntity>
++
+     /** Finds the latest account record for a given last-4 digits, regardless of bank name. */
+     @Query("""
+         SELECT * FROM account_balances
+diff --git a/app/src/main/java/com/ritesh/cashiro/data/model/ChatContext.kt b/app/src/main/java/com/ritesh/cashiro/data/model/ChatContext.kt
+deleted file mode 100644
+index f00fea4..0000000
+--- a/app/src/main/java/com/ritesh/cashiro/data/model/ChatContext.kt
++++ /dev/null
+@@ -1,88 +0,0 @@
+-package com.ritesh.cashiro.data.model
+-
+-import com.ritesh.cashiro.data.database.entity.TransactionType
+-import java.math.BigDecimal
+-import java.time.LocalDate
+-import java.time.LocalDateTime
+-
+-/**
+- * Data models for AI chat context
+- */
+-data class ChatContext(
+-    val currentDate: LocalDate,
+-    val monthSummary: MonthSummary,
+-    val recentTransactions: List<TransactionSummary>,
+-    val activeSubscriptions: List<SubscriptionSummary>,
+-    val topCategories: List<CategorySpending>,
+-    val quickStats: QuickStats,
+-    val budgets: List<BudgetSummary> = emptyList(),
+-    val accountBalances: List<AccountBalanceSummary> = emptyList(),
+-    val categories: List<CategoryInfo> = emptyList()
+-)
+-
+-data class MonthSummary(
+-    val totalIncome: BigDecimal,
+-    val totalExpense: BigDecimal,
+-    val transactionCount: Int,
+-    val daysInMonth: Int,
+-    val currentDay: Int
+-)
+-
+-data class TransactionSummary(
+-    val merchantName: String,
+-    val amount: BigDecimal,
+-    val originalCurrency: String = "INR",
+-    val convertedAmount: BigDecimal? = null,
+-    val category: String,
+-    val subcategory: String? = null,
+-    val daysAgo: Int,
+-    val dateTime: LocalDateTime = LocalDateTime.now(),
+-    val transactionType: TransactionType = TransactionType.EXPENSE
+-)
+-
+-data class SubscriptionSummary(
+-    val merchantName: String,
+-    val amount: BigDecimal,
+-    val nextPaymentDays: Int
+-)
+-
+-data class CategorySpending(
+-    val category: String,
+-    val amount: BigDecimal,
+-    val percentage: Float,
+-    val transactionCount: Int
+-)
+-
+-data class QuickStats(
+-    val avgDailySpending: BigDecimal,
+-    val largestExpenseThisMonth: TransactionSummary?,
+-    val mostFrequentMerchant: String?,
+-    val mostFrequentMerchantCount: Int = 0
+-)
+-
+-data class BudgetSummary(
+-    val name: String,
+-    val amount: BigDecimal,
+-    val currentSpending: BigDecimal,
+-    val remaining: BigDecimal,
+-    val percentUsed: Float,
+-    val currency: String
+-)
+-
+-data class CategoryInfo(
+-    val name: String,
+-    val subcategories: List<String> = emptyList()
+-)
+-
+-data class AccountBalanceSummary(
+-    val bankName: String,
+-    val accountLast4: String,
+-    val balance: BigDecimal,
+-    val currency: String,
+-    val isCreditCard: Boolean = false,
+-    val isWallet: Boolean = false,
+-    val creditLimit: BigDecimal? = null
+-) {
+-    val availableCredit: BigDecimal?
+-        get() = if (isCreditCard && creditLimit != null) creditLimit - balance else null
+-}
+\ No newline at end of file
+diff --git a/app/src/main/java/com/ritesh/cashiro/data/repository/AccountBalanceRepository.kt b/app/src/main/java/com/ritesh/cashiro/data/repository/AccountBalanceRepository.kt
+index d1bbb27..a1bd690 100644
+--- a/app/src/main/java/com/ritesh/cashiro/data/repository/AccountBalanceRepository.kt
++++ b/app/src/main/java/com/ritesh/cashiro/data/repository/AccountBalanceRepository.kt
+@@ -252,6 +252,10 @@ class AccountBalanceRepository @Inject constructor(
+         return accountBalanceDao.getBalanceByTransactionId(transactionId)
+     }
+ 
++    suspend fun getBalancesByTransactionId(transactionId: Long): List<AccountBalanceEntity> {
++        return accountBalanceDao.getBalancesByTransactionId(transactionId)
++    }
++
+     suspend fun getBalanceById(id: Long): AccountBalanceEntity? {
+         return accountBalanceDao.getBalanceById(id)
+     }
+diff --git a/app/src/main/java/com/ritesh/cashiro/data/repository/AiContextRepository.kt b/app/src/main/java/com/ritesh/cashiro/data/repository/AiContextRepository.kt
+deleted file mode 100644
+index c582df5..0000000
+--- a/app/src/main/java/com/ritesh/cashiro/data/repository/AiContextRepository.kt
++++ /dev/null
+@@ -1,308 +0,0 @@
+-package com.ritesh.cashiro.data.repository
+-
+-import com.ritesh.cashiro.data.currency.CurrencyConversionService
+-import com.ritesh.cashiro.data.database.dao.SubscriptionDao
+-import com.ritesh.cashiro.data.database.dao.TransactionDao
+-import com.ritesh.cashiro.data.database.entity.SubscriptionState
+-import com.ritesh.cashiro.data.database.entity.TransactionEntity
+-import com.ritesh.cashiro.data.database.entity.TransactionType
+-import com.ritesh.cashiro.data.model.*
+-import kotlinx.coroutines.async
+-import kotlinx.coroutines.coroutineScope
+-import kotlinx.coroutines.flow.first
+-import java.math.BigDecimal
+-import java.math.RoundingMode
+-import java.time.LocalDate
+-import java.time.YearMonth
+-import java.time.temporal.ChronoUnit
+-import javax.inject.Inject
+-import javax.inject.Singleton
+-
+-/**
+- * Repository for gathering AI chat context from financial data
+- */
+-@Singleton
+-class AiContextRepository @Inject constructor(
+-    private val transactionDao: TransactionDao,
+-    private val subscriptionDao: SubscriptionDao,
+-    private val budgetRepository: BudgetRepository,
+-    private val accountBalanceRepository: AccountBalanceRepository,
+-    private val currencyRepository: CurrencyRepository,
+-    private val currencyConversionService: CurrencyConversionService,
+-    private val categoryRepository: CategoryRepository,
+-    private val subcategoryRepository: SubcategoryRepository
+-) {
+-    
+-    /**
+-     * Gathers all financial context for AI chat in parallel
+-     */
+-    suspend fun getChatContext(): ChatContext = coroutineScope {
+-        val currentDate = LocalDate.now()
+-        val effectiveCurrency = currencyRepository.effectiveBaseCurrencyCode.first()
+-        
+-        // Launch parallel queries
+-        val monthSummaryDeferred = async { getMonthSummary(currentDate) }
+-        val recentTransactionsDeferred = async { getRecentTransactions(currentDate, effectiveCurrency) }
+-        val activeSubscriptionsDeferred = async { getActiveSubscriptions(currentDate) }
+-        val topCategoriesDeferred = async { getTopCategories(currentDate) }
+-        val quickStatsDeferred = async { getQuickStats(currentDate, effectiveCurrency) }
+-        val budgetsDeferred = async { getBudgets() }
+-        val accountBalancesDeferred = async { getAccountBalances() }
+-        val categoriesDeferred = async { getAllCategories() }
+-        
+-        ChatContext(
+-            currentDate = currentDate,
+-            monthSummary = monthSummaryDeferred.await(),
+-            recentTransactions = recentTransactionsDeferred.await(),
+-            activeSubscriptions = activeSubscriptionsDeferred.await(),
+-            topCategories = topCategoriesDeferred.await(),
+-            quickStats = quickStatsDeferred.await(),
+-            budgets = budgetsDeferred.await(),
+-            accountBalances = accountBalancesDeferred.await(),
+-            categories = categoriesDeferred.await()
+-        )
+-    }
+-    
+-    private suspend fun getMonthSummary(currentDate: LocalDate): MonthSummary {
+-        val yearMonth = YearMonth.from(currentDate)
+-        val startOfMonth = yearMonth.atDay(1)
+-        val endOfMonth = yearMonth.atEndOfMonth()
+-        
+-        // Get all transactions for current month
+-        val transactions = transactionDao.getTransactionsBetweenDatesList(
+-            startOfMonth.atStartOfDay(),
+-            endOfMonth.atTime(23, 59, 59)
+-        )
+-        
+-        var totalIncome = BigDecimal.ZERO
+-        var totalExpense = BigDecimal.ZERO
+-        val transactionCount = transactions.size
+-        
+-        // Process in a single pass
+-        transactions.forEach { transaction ->
+-            when (transaction.transactionType) {
+-                TransactionType.INCOME -> totalIncome = totalIncome.add(transaction.amount)
+-                TransactionType.EXPENSE -> totalExpense = totalExpense.add(transaction.amount)
+-                TransactionType.CREDIT -> totalExpense = totalExpense.add(transaction.amount) // Credit counts as expense
+-                TransactionType.TRANSFER -> {} // Transfers don't affect income/expense totals
+-                TransactionType.INVESTMENT -> {} // Investments are asset reallocation, not expenses
+-                TransactionType.BALANCE_UPDATE -> {} // Balance updates track account balance, not income/expense
+-                TransactionType.BORROWED -> totalIncome = totalIncome.add(transaction.amount) // Borrowed money is inflow
+-                TransactionType.LENT -> totalExpense = totalExpense.add(transaction.amount) // Lent money is outflow
+-            }
+-        }
+-        
+-        return MonthSummary(
+-            totalIncome = totalIncome,
+-            totalExpense = totalExpense,
+-            transactionCount = transactionCount,
+-            daysInMonth = yearMonth.lengthOfMonth(),
+-            currentDay = currentDate.dayOfMonth
+-        )
+-    }
+-    
+-    private suspend fun getRecentTransactions(currentDate: LocalDate, effectiveCurrency: String, days: Int = 14): List<TransactionSummary> {
+-        val startDate = currentDate.minusDays(days.toLong())
+-        
+-        val transactions = transactionDao.getTransactionsBetweenDatesList(
+-            startDate.atStartOfDay(),
+-            currentDate.atTime(23, 59, 59)
+-        )
+-        
+-        return transactions
+-            .sortedByDescending { it.dateTime } // Most recent first
+-            .take(20) // Limit to 20 most recent
+-            .map { transaction ->
+-                val daysAgo = ChronoUnit.DAYS.between(
+-                    transaction.dateTime.toLocalDate(),
+-                    currentDate
+-                ).toInt()
+-                
+-                val converted = if (transaction.currency != effectiveCurrency) {
+-                    try {
+-                        currencyConversionService.convertAmount(transaction.amount, transaction.currency, effectiveCurrency)
+-                    } catch (_: Exception) { null }
+-                } else null
+-                
+-                TransactionSummary(
+-                    merchantName = transaction.merchantName,
+-                    amount = transaction.amount,
+-                    originalCurrency = transaction.currency,
+-                    convertedAmount = converted,
+-                    category = transaction.category ?: "Miscellaneous",
+-                    subcategory = transaction.subcategory,
+-                    daysAgo = daysAgo,
+-                    dateTime = transaction.dateTime,
+-                    transactionType = transaction.transactionType
+-                )
+-            }
+-    }
+-    
+-    private suspend fun getActiveSubscriptions(currentDate: LocalDate): List<SubscriptionSummary> {
+-        return subscriptionDao.getSubscriptionsByStateList(SubscriptionState.ACTIVE)
+-            .map { subscription ->
+-                val daysUntilPayment = ChronoUnit.DAYS.between(
+-                    currentDate,
+-                    subscription.nextPaymentDate
+-                ).toInt()
+-                
+-                SubscriptionSummary(
+-                    merchantName = subscription.merchantName,
+-                    amount = subscription.amount,
+-                    nextPaymentDays = daysUntilPayment
+-                )
+-            }
+-            .sortedBy { it.nextPaymentDays }
+-            .take(10) // Limit to 10 subscriptions
+-    }
+-    
+-    private suspend fun getTopCategories(currentDate: LocalDate): List<CategorySpending> {
+-        val yearMonth = YearMonth.from(currentDate)
+-        val startOfMonth = yearMonth.atDay(1)
+-        val endOfMonth = yearMonth.atEndOfMonth()
+-        
+-        val transactions = transactionDao.getTransactionsBetweenDatesList(
+-            startOfMonth.atStartOfDay(),
+-            endOfMonth.atTime(23, 59, 59)
+-        )
+-        
+-        // Group by category and calculate spending
+-        val categoryMap = mutableMapOf<String, MutableList<BigDecimal>>()
+-        var totalExpense = BigDecimal.ZERO
+-        
+-        transactions
+-            .filter { it.transactionType == TransactionType.EXPENSE || it.transactionType == TransactionType.LENT }
+-            .forEach { transaction ->
+-                val category = transaction.category ?: "Miscellaneous"
+-                categoryMap.getOrPut(category) { mutableListOf() }.add(transaction.amount)
+-                totalExpense = totalExpense.add(transaction.amount)
+-            }
+-        
+-        return categoryMap.map { (category, amounts) ->
+-            val categoryTotal = amounts.reduce { acc, amount -> acc.add(amount) }
+-            val percentage = if (totalExpense > BigDecimal.ZERO) {
+-                categoryTotal.divide(totalExpense, 4, RoundingMode.HALF_UP)
+-                    .multiply(BigDecimal(100))
+-                    .toFloat()
+-            } else 0f
+-            
+-            CategorySpending(
+-                category = category,
+-                amount = categoryTotal,
+-                percentage = percentage,
+-                transactionCount = amounts.size
+-            )
+-        }
+-            .sortedByDescending { it.amount }
+-            .take(5) // Top 5 categories
+-    }
+-    
+-    private suspend fun getBudgets(): List<BudgetSummary> {
+-        val budgets = budgetRepository.getAllBudgets().first()
+-        return budgets
+-            .filter { it.isActive }
+-            .mapNotNull { budget ->
+-                try {
+-                    val withSpending = budgetRepository.getBudgetWithSpending(budget)
+-                    BudgetSummary(
+-                        name = budget.name,
+-                        amount = budget.amount,
+-                        currentSpending = withSpending.currentSpending,
+-                        remaining = withSpending.remaining,
+-                        percentUsed = withSpending.percentUsed,
+-                        currency = budget.currency
+-                    )
+-                } catch (e: Exception) {
+-                    null
+-                }
+-            }
+-            .sortedByDescending { it.percentUsed }
+-    }
+-
+-    private suspend fun getAccountBalances(): List<AccountBalanceSummary> {
+-        return accountBalanceRepository.getAllLatestBalances()
+-            .first()
+-            .map { balance ->
+-                val available = if (balance.isCreditCard && balance.creditLimit != null) {
+-                    balance.creditLimit - balance.balance
+-                } else null
+-                AccountBalanceSummary(
+-                    bankName = balance.bankName,
+-                    accountLast4 = balance.accountLast4,
+-                    balance = balance.balance,
+-                    currency = balance.currency,
+-                    isCreditCard = balance.isCreditCard,
+-                    isWallet = balance.isWallet,
+-                    creditLimit = if (balance.isCreditCard) balance.creditLimit else null
+-                )
+-            }
+-            .sortedBy { it.bankName }
+-    }
+-
+-    private suspend fun getQuickStats(currentDate: LocalDate, effectiveCurrency: String): QuickStats {
+-        val yearMonth = YearMonth.from(currentDate)
+-        val startOfMonth = yearMonth.atDay(1)
+-        val endOfMonth = yearMonth.atEndOfMonth()
+-        
+-        val transactions = transactionDao.getTransactionsBetweenDatesList(
+-            startOfMonth.atStartOfDay(),
+-            endOfMonth.atTime(23, 59, 59)
+-        )
+-        
+-        val expenses = transactions.filter { it.transactionType == TransactionType.EXPENSE || it.transactionType == TransactionType.LENT }
+-        
+-        // Calculate average daily spending
+-        var totalExpense = BigDecimal.ZERO
+-        for (expense in expenses) {
+-            totalExpense += expense.amount
+-        }
+-        val daysElapsed = currentDate.dayOfMonth
+-        val avgDailySpending = if (daysElapsed > 0) {
+-            totalExpense.divide(BigDecimal.valueOf(daysElapsed.toLong()), 2, RoundingMode.HALF_UP)
+-        } else BigDecimal.ZERO
+-        
+-        // Find largest expense
+-        val largestExpense = expenses.maxByOrNull { it.amount }?.let { transaction ->
+-            val daysAgo = ChronoUnit.DAYS.between(
+-                transaction.dateTime.toLocalDate(),
+-                currentDate
+-            ).toInt()
+-            
+-            val converted = if (transaction.currency != effectiveCurrency) {
+-                try {
+-                    currencyConversionService.convertAmount(transaction.amount, transaction.currency, effectiveCurrency)
+-                } catch (_: Exception) { null }
+-            } else null
+-            
+-            TransactionSummary(
+-                merchantName = transaction.merchantName,
+-                amount = transaction.amount,
+-                originalCurrency = transaction.currency,
+-                convertedAmount = converted,
+-                category = transaction.category ?: "Miscellaneous",
+-                subcategory = transaction.subcategory,
+-                daysAgo = daysAgo
+-            )
+-        }
+-        
+-        // Find most frequent merchant
+-        val merchantCounts = expenses.groupingBy { it.merchantName }.eachCount()
+-        val mostFrequent = merchantCounts.maxByOrNull { it.value }
+-        
+-        return QuickStats(
+-            avgDailySpending = avgDailySpending,
+-            largestExpenseThisMonth = largestExpense,
+-            mostFrequentMerchant = mostFrequent?.key,
+-            mostFrequentMerchantCount = mostFrequent?.value ?: 0
+-        )
+-    }
+-
+-    private suspend fun getAllCategories(): List<CategoryInfo> {
+-        val cats = categoryRepository.getAllCategories().first()
+-        val subMap = subcategoryRepository.subcategoriesMap.value
+-        return cats.map { cat ->
+-            val subs = subMap[cat.id]?.map { it.name } ?: emptyList()
+-            CategoryInfo(name = cat.name, subcategories = subs)
+-        }
+-    }
+-}
+\ No newline at end of file
+diff --git a/app/src/main/java/com/ritesh/cashiro/data/repository/CategoryRepository.kt b/app/src/main/java/com/ritesh/cashiro/data/repository/CategoryRepository.kt
+index 62c33b2..175a31c 100644
+--- a/app/src/main/java/com/ritesh/cashiro/data/repository/CategoryRepository.kt
++++ b/app/src/main/java/com/ritesh/cashiro/data/repository/CategoryRepository.kt
+@@ -93,9 +93,11 @@ class CategoryRepository @Inject constructor(
+     }
+     
+     suspend fun deleteCategory(categoryId: Long): Boolean {
+-        // Only delete non-system categories
++        // Any category can be deleted in this build, including the built-in
++        // (system) ones the user never uses. Seeding only runs on first
++        // install, so deleted categories do not come back.
+         val category = categoryDao.getCategoryById(categoryId)
+-        if (category != null && !category.isSystem) {
++        if (category != null) {
+             categoryDao.deleteCategory(categoryId)
+             return true
+         }
+diff --git a/app/src/main/java/com/ritesh/cashiro/data/repository/LlmRepository.kt b/app/src/main/java/com/ritesh/cashiro/data/repository/LlmRepository.kt
+deleted file mode 100644
+index 46a6b7b..0000000
+--- a/app/src/main/java/com/ritesh/cashiro/data/repository/LlmRepository.kt
++++ /dev/null
+@@ -1,365 +0,0 @@
+-package com.ritesh.cashiro.data.repository
+-
+-import android.util.Log
+-import com.ritesh.cashiro.data.database.dao.ChatDao
+-import com.ritesh.cashiro.data.database.dao.ChatSessionDao
+-import com.ritesh.cashiro.data.database.entity.ChatMessage
+-import com.ritesh.cashiro.data.database.entity.ChatSession
+-import com.ritesh.cashiro.data.database.entity.TransactionType
+-import com.ritesh.cashiro.data.model.ChatContext
+-import com.ritesh.cashiro.data.model.SubscriptionSummary
+-import com.ritesh.cashiro.data.preferences.UserPreferencesRepository
+-import com.ritesh.cashiro.domain.service.LlmService
+-import com.ritesh.cashiro.utils.CurrencyFormatter
+-import java.math.BigDecimal
+-import kotlinx.coroutines.flow.Flow
+-import kotlinx.coroutines.flow.flow
+-import kotlinx.coroutines.flow.first
+-import javax.inject.Inject
+-import javax.inject.Singleton
+-
+-@Singleton
+-class LlmRepository @Inject constructor(
+-    private val llmService: LlmService,
+-    private val chatDao: ChatDao,
+-    private val chatSessionDao: ChatSessionDao,
+-    private val modelRepository: ModelRepository,
+-    private val aiContextRepository: AiContextRepository,
+-    private val userPreferencesRepository: UserPreferencesRepository,
+-    private val currencyRepository: CurrencyRepository
+-) {
+-    fun getMessagesForSession(sessionId: String): Flow<List<ChatMessage>> = chatDao.getMessagesForSession(sessionId)
+-    
+-    fun getAllMessagesIncludingSystemForSession(sessionId: String): Flow<List<ChatMessage>> = chatDao.getAllMessagesIncludingSystemForSession(sessionId)
+-    
+-    fun getAllSessions(): Flow<List<ChatSession>> = chatSessionDao.getAllSessions()
+-    
+-    suspend fun sendMessage(userMessage: String, sessionId: String = "legacy_session"): Result<String> {
+-        // Save user message
+-        val userChatMessage = ChatMessage(
+-            message = userMessage,
+-            isUser = true,
+-            sessionId = sessionId
+-        )
+-        chatDao.insertMessage(userChatMessage)
+-        
+-        // Initialize LLM if needed
+-        if (!llmService.isInitialized()) {
+-            if (!com.ritesh.cashiro.core.Constants.Device.is64Bit) {
+-                return Result.failure(Exception("AI features are not supported on 32-bit devices."))
+-            }
+-            val modelFile = modelRepository.getModelFile()
+-            if (!modelFile.exists()) {
+-                return Result.failure(Exception("Model not downloaded"))
+-            }
+-            
+-            val initResult = llmService.initialize(modelFile.absolutePath)
+-            if (initResult.isFailure) {
+-                return Result.failure(initResult.exceptionOrNull() ?: Exception("Failed to initialize LLM"))
+-            }
+-        }
+-        
+-        // Generate response
+-        val responseResult = llmService.generateResponse(userMessage)
+-        
+-        return if (responseResult.isSuccess) {
+-            val response = responseResult.getOrNull() ?: ""
+-            
+-            // Save AI response
+-            val aiChatMessage = ChatMessage(
+-                message = response,
+-                isUser = false,
+-                sessionId = sessionId
+-            )
+-            chatDao.insertMessage(aiChatMessage)
+-            
+-            Result.success(response)
+-        } else {
+-            Result.failure(responseResult.exceptionOrNull() ?: Exception("Failed to generate response"))
+-        }
+-    }
+-    
+-    fun sendMessageStream(userMessage: String, sessionId: String, insertUserMessage: Boolean = true): Flow<String> = flow {
+-        // Check if this is the first message (no existing messages in session)
+-        val existingMessages = chatDao.getAllMessagesForContext(sessionId)
+-        val isNewChat = existingMessages.isEmpty()
+-
+-        // Check if model is downloading
+-        val currentModelState = modelRepository.modelState.first()
+-        if (currentModelState == ModelState.DOWNLOADING) {
+-            throw Exception("Model is currently downloading. Please wait for download to complete.")
+-        }
+-
+-        // Initialize LLM if needed
+-        if (!llmService.isInitialized()) {
+-            if (!com.ritesh.cashiro.core.Constants.Device.is64Bit) {
+-                throw Exception("AI features are not supported on 32-bit devices.")
+-            }
+-            val modelFile = modelRepository.getModelFile()
+-            if (!modelFile.exists()) {
+-                throw Exception("Model not downloaded. Please download from Settings.")
+-            }
+-            val initResult = llmService.initialize(modelFile.absolutePath)
+-            if (initResult.isFailure) {
+-                throw initResult.exceptionOrNull() ?: Exception("Failed to initialize LLM")
+-            }
+-        }
+-
+-        // Create the DB session record for new chats
+-        if (isNewChat) {
+-            val words = userMessage.split("\\s+".toRegex())
+-            val title = words.take(4).joinToString(" ") + if (words.size > 4) "..." else ""
+-            chatSessionDao.insertSession(ChatSession(id = sessionId, title = title))
+-            Log.d("LlmRepository", "New session created: $sessionId")
+-        }
+-
+-        // Save user message to DB
+-        if (insertUserMessage) {
+-            val userChatMessage = ChatMessage(
+-                message = userMessage,
+-                isUser = true,
+-                sessionId = sessionId
+-            )
+-            chatDao.insertMessage(userChatMessage)
+-            Log.d("LlmRepository", "User message saved: ${userMessage.take(50)}")
+-        }
+-
+-        // Build the full prompt context from scratch on every turn:
+-        //   [dynamic system prompt] + [recent chat history from DB] + [current user message]
+-        //
+-        // We ALWAYS reset the Conversation before sending so the model never sees
+-        // history duplicated — the reset wipes the internal KV-cache, then we
+-        // re-supply the history ourselves through the single combined prompt string.
+-        val chatContext = aiContextRepository.getChatContext()
+-        val currencyCode = currencyRepository.effectiveBaseCurrencyCode.first()
+-        val systemPrompt = buildSystemPrompt(chatContext, currencyCode)
+-        userPreferencesRepository.updateSystemPrompt(systemPrompt)
+-
+-        // Fetch the DB history (now includes the user message we just saved)
+-        val history = chatDao.getAllMessagesForContext(sessionId)
+-        val fullPrompt = buildFullPrompt(systemPrompt, history, userMessage)
+-
+-        Log.d("LlmRepository", "=== SENDING TO LLM ===")
+-        Log.d("LlmRepository", "Prompt length: ${fullPrompt.length} chars (~${fullPrompt.length / 4} tokens)")
+-        Log.d("LlmRepository", fullPrompt.take(300))
+-
+-        // Reset the Conversation (wipes KV-cache) then send the full combined prompt.
+-        // This prevents history duplication that caused hallucination loops.
+-        llmService.resetConversation()
+-
+-        val responseBuilder = StringBuilder()
+-
+-        try {
+-            llmService.generateResponseStream(fullPrompt)
+-                .collect { partialResponse ->
+-                    responseBuilder.append(partialResponse)
+-                    emit(partialResponse)
+-                }
+-        } finally {
+-            val finalResponse = responseBuilder.toString()
+-            if (finalResponse.isNotEmpty()) {
+-                kotlinx.coroutines.withContext(kotlinx.coroutines.NonCancellable) {
+-                    val aiMessage = ChatMessage(
+-                        message = finalResponse,
+-                        isUser = false,
+-                        sessionId = sessionId
+-                    )
+-                    chatDao.insertMessage(aiMessage)
+-                    Log.d("LlmRepository", "AI response saved: ${finalResponse.take(50)}")
+-                }
+-            }
+-        }
+-    }
+-    
+-    suspend fun deleteAllMessagesForSession(sessionId: String) {
+-        chatDao.deleteMessagesForSession(sessionId)
+-        chatSessionDao.deleteSession(sessionId)
+-    }
+-    
+-    suspend fun deleteMessage(messageId: String) {
+-        chatDao.deleteMessage(messageId)
+-    }
+-    
+-    suspend fun editMessage(messageId: String, newText: String) {
+-        val msg = chatDao.getMessageById(messageId) ?: return
+-        chatDao.deleteMessage(messageId)
+-        chatDao.deleteMessagesAfter(msg.sessionId, msg.timestamp)
+-    }
+-
+-    suspend fun getMessageById(messageId: String): ChatMessage? = chatDao.getMessageById(messageId)
+-    
+-    suspend fun deleteMessagesAfter(sessionId: String, timestamp: Long) = chatDao.deleteMessagesAfter(sessionId, timestamp)
+-    
+-    suspend fun getLastUserMessage(sessionId: String): ChatMessage? = chatDao.getLastUserMessage(sessionId)
+-
+-    suspend fun getMessageCountForSession(sessionId: String): Int = chatDao.getMessageCountForSession(sessionId)
+-
+-    /**
+-     * Assembles the full prompt string sent to the model on every turn:
+-     *   [system prompt]
+-     *   [chat history turns (oldest first)]
+-     *   User: [current message]
+-     *   Assistant:
+-     *
+-     * The history already contains the current user message (saved before this call),
+-     * so we skip re-appending it and instead rely on the "User:" prefix added at the end.
+-     */
+-    private fun buildFullPrompt(
+-        systemPrompt: String,
+-        history: List<ChatMessage>,
+-        currentUserMessage: String
+-    ): String {
+-        val sb = StringBuilder()
+-        sb.append(systemPrompt)
+-        sb.append("\n\n")
+-
+-        // Add prior turns (exclude system-prompt DB rows and the last user message,
+-        // which we will re-append with the "User:" prefix below)
+-        val priorTurns = history
+-            .filter { !it.isSystemPrompt }
+-            .dropLastWhile { it.isUser && it.message == currentUserMessage }
+-
+-        priorTurns.forEach { msg ->
+-            if (msg.isUser) {
+-                sb.append("User: ${msg.message}\n")
+-            } else {
+-                sb.append("Assistant: ${msg.message}\n")
+-            }
+-        }
+-
+-        sb.append("User: $currentUserMessage\n")
+-        sb.append("Assistant:")
+-
+-        return sb.toString()
+-    }
+-    
+-    private fun buildSystemPrompt(context: ChatContext, currencyCode: String): String {
+-        val monthSummary = context.monthSummary
+-        val topCategories = context.topCategories
+-        val activeSubs = context.activeSubscriptions
+-        val stats = context.quickStats
+-        val budgets = context.budgets
+-        val accounts = context.accountBalances
+-        val categories = context.categories
+-
+-        var totalSubAmount = BigDecimal.ZERO
+-        for (sub in activeSubs) {
+-            totalSubAmount += sub.amount
+-        }
+-        val upcomingPayments = activeSubs.filter { it.nextPaymentDays <= 7 }
+-
+-        val recentLines = context.recentTransactions.take(10).joinToString("\n") { t ->
+-            val dateStr = t.dateTime.format(java.time.format.DateTimeFormatter.ofPattern("MMM d"))
+-            val typeSign = when (t.transactionType) {
+-                TransactionType.INCOME, TransactionType.BORROWED -> "+"
+-                else -> "-"
+-            }
+-            val origFormatted = CurrencyFormatter.formatCurrency(t.amount, t.originalCurrency)
+-            val conversion = t.convertedAmount?.let { conv ->
+-                " (≈ ${CurrencyFormatter.formatCurrency(conv, currencyCode)})"
+-            } ?: ""
+-            "$dateStr: ${t.merchantName} $typeSign$origFormatted$conversion [${t.transactionType.name}] (${t.category})"
+-        }
+-
+-        val budgetLines = budgets.joinToString("\n") { b ->
+-            val spent = CurrencyFormatter.formatCurrency(b.currentSpending, b.currency)
+-            val total = CurrencyFormatter.formatCurrency(b.amount, b.currency)
+-            val remaining = CurrencyFormatter.formatCurrency(b.remaining, b.currency)
+-            "- ${b.name}: $spent / $total (${(b.percentUsed * 100).toInt()}%) — $remaining remaining"
+-        }
+-
+-        val bankLines = accounts.filter { !it.isCreditCard && !it.isWallet }
+-            .joinToString("\n") { a ->
+-                val bal = CurrencyFormatter.formatCurrency(a.balance, a.currency)
+-                "- ${a.bankName} (••••${a.accountLast4}): $bal"
+-            }
+-
+-        val walletLines = accounts.filter { it.isWallet }
+-            .joinToString("\n") { a ->
+-                val bal = CurrencyFormatter.formatCurrency(a.balance, a.currency)
+-                "- ${a.bankName} (••••${a.accountLast4}): $bal"
+-            }
+-
+-        val creditLines = accounts.filter { it.isCreditCard }
+-            .joinToString("\n") { a ->
+-                val bal = CurrencyFormatter.formatCurrency(a.balance, a.currency)
+-                val limit = a.creditLimit?.let { CurrencyFormatter.formatCurrency(it, a.currency) } ?: "N/A"
+-                val avail = a.availableCredit?.let { CurrencyFormatter.formatCurrency(it, a.currency) } ?: "N/A"
+-                "- ${a.bankName} (••••${a.accountLast4}): $bal outstanding / $limit limit ($avail available)"
+-            }
+-
+-        val categoryLines = categories.joinToString("\n") { cat ->
+-            val subs = cat.subcategories.take(4)
+-            if (subs.isNotEmpty()) "- ${cat.name}: ${subs.joinToString(", ")}" else "- ${cat.name}"
+-        }
+-
+-        val effSymbol = com.ritesh.cashiro.data.currency.model.CurrencySymbols.getSymbol(currencyCode)
+-
+-        return """
+-You are Cashiro AI, a concise financial assistant. Answer only from the data below. Never guess or invent numbers.
+-
+-DATA (as of ${context.currentDate}):
+-This month: spent ${CurrencyFormatter.formatCurrency(monthSummary.totalExpense, currencyCode)}, income ${CurrencyFormatter.formatCurrency(monthSummary.totalIncome, currencyCode)}, ${monthSummary.transactionCount} transactions, daily avg ${CurrencyFormatter.formatCurrency(stats.avgDailySpending, currencyCode)}
+-
+-Top categories:
+-${topCategories.joinToString("\n") { "- ${it.category}: ${CurrencyFormatter.formatCurrency(it.amount, currencyCode)} (${it.percentage.toInt()}%)" }}
+-
+-Subscriptions: ${activeSubs.size} active, ${CurrencyFormatter.formatCurrency(totalSubAmount, currencyCode)}/month${if (upcomingPayments.isNotEmpty()) ", ${upcomingPayments.size} due within 7 days" else ""}
+-
+-Recent transactions (last 14 days):
+-$recentLines
+-
+-Active budgets:
+-${if (budgetLines.isNotEmpty()) budgetLines else "None"}
+-
+-Bank Accounts:
+-${if (bankLines.isNotEmpty()) bankLines else "None"}
+-
+-Wallets:
+-${if (walletLines.isNotEmpty()) walletLines else "None"}
+-
+-Credit Cards:
+-${if (creditLines.isNotEmpty()) creditLines else "None"}
+-
+-Categories:
+-${categoryLines}
+-
+-## Currency Rules
+-- Display amounts in their original currency using the symbol (e.g., "$100", "€50", "₹500", "£75") — NEVER use currency codes like "USD", "INR", "EUR".
+-- When a converted amount is shown in parentheses (≈ ...), you may reference both: e.g., "the transaction is $5 (~₹450)".
+-- For summary totals (monthly income/expense, budget totals), use $effSymbol only.
+-- Each transaction and account line already shows the correct currency symbol. Always repeat amounts exactly as shown — do not convert or change the currency symbol.
+-        """.trimIndent()
+-    }
+-    
+-    suspend fun updateSystemPrompt() {
+-        val chatContext = aiContextRepository.getChatContext()
+-        val currencyCode = currencyRepository.effectiveBaseCurrencyCode.first()
+-        val newPrompt = buildSystemPrompt(chatContext, currencyCode)
+-        userPreferencesRepository.updateSystemPrompt(newPrompt)
+-        Log.d("LlmRepository", "System prompt updated with latest financial data")
+-    }
+-    
+-    suspend fun getFormattedContextForDisplay(): String {
+-        val chatContext = aiContextRepository.getChatContext()
+-        val monthSummary = chatContext.monthSummary
+-        val recentCount = minOf(chatContext.recentTransactions.size, 10)
+-        val activeSubs = chatContext.activeSubscriptions
+-        
+-        return """
+-        Hi! I'm Cashiro AI, your financial assistant.
+-        
+-        I have access to:
+-        • Your last 2 weeks of transactions ($recentCount recent ones)
+-        • This month's summary (${monthSummary.transactionCount} total transactions)
+-        • Monthly income and expenses
+-        • Top spending categories
+-        • Active subscriptions (${activeSubs.size} services)
+-        • Daily spending averages
+-        
+-        I can help you understand your spending, find savings, and answer questions about your recent finances.
+-        
+-        What would you like to know?
+-        """.trimIndent()
+-    }
+-}
+\ No newline at end of file
+diff --git a/app/src/main/java/com/ritesh/cashiro/data/repository/SubcategoryRepository.kt b/app/src/main/java/com/ritesh/cashiro/data/repository/SubcategoryRepository.kt
+index f1e89db..3c67799 100644
+--- a/app/src/main/java/com/ritesh/cashiro/data/repository/SubcategoryRepository.kt
++++ b/app/src/main/java/com/ritesh/cashiro/data/repository/SubcategoryRepository.kt
+@@ -84,17 +84,14 @@ class SubcategoryRepository @Inject constructor(
+     }
+ 
+     suspend fun deleteSubcategory(subcategory: SubcategoryEntity): Boolean {
+-        // Only delete non-system subcategories
+-        if (!subcategory.isSystem) {
+-            subcategoryDao.deleteSubcategory(subcategory)
+-            return true
+-        }
+-        return false
++        // Any subcategory can be deleted in this build, including built-in ones.
++        subcategoryDao.deleteSubcategory(subcategory)
++        return true
+     }
+ 
+     suspend fun deleteSubcategoryById(subcategoryId: Long): Boolean {
+         val subcategory = subcategoryDao.getSubcategoryById(subcategoryId)
+-        if (subcategory != null && !subcategory.isSystem) {
++        if (subcategory != null) {
+             subcategoryDao.deleteSubcategoryById(subcategoryId)
+             return true
+         }
+diff --git a/app/src/main/java/com/ritesh/cashiro/data/repository/TransactionRepository.kt b/app/src/main/java/com/ritesh/cashiro/data/repository/TransactionRepository.kt
+index f6961f0..b52821a 100644
+--- a/app/src/main/java/com/ritesh/cashiro/data/repository/TransactionRepository.kt
++++ b/app/src/main/java/com/ritesh/cashiro/data/repository/TransactionRepository.kt
+@@ -124,6 +124,9 @@ class TransactionRepository @Inject constructor(
+             transactionDao.updateTransaction(transaction)
+ 
+     suspend fun deleteTransaction(transaction: TransactionEntity, hardDelete: Boolean = false) {
++        // Guard: reversing an already-deleted transaction would restore its
++        // amount a second time and corrupt the balance.
++        if (transaction.isDeleted && !hardDelete) return
+         if (hardDelete) {
+             transactionDao.deleteTransaction(transaction)
+         } else {
+@@ -134,6 +137,7 @@ class TransactionRepository @Inject constructor(
+ 
+     suspend fun deleteTransactionById(id: Long, hardDelete: Boolean = false) {
+         val transaction = transactionDao.getTransactionById(id) ?: return
++        if (transaction.isDeleted && !hardDelete) return
+         if (hardDelete) {
+             transactionDao.deleteTransactionById(id)
+         } else {
+@@ -181,15 +185,58 @@ class TransactionRepository @Inject constructor(
+         }
+     }
+ 
++    /**
++     * Correctly restores the account balance when a transaction is deleted.
++     *
++     * The old implementation appended a new DELETE_REVERSAL row computed from the
++     * *latest* balance. That row was not linked to the transaction, it used the
++     * wrong sign for credit-card accounts, it did nothing at all for TRANSFERs,
++     * and later balance recalculations could overwrite it — so deleting an
++     * expense often left the deducted money missing from the balance.
++     *
++     * The fix: delete every balance entry that this transaction itself created
++     * (linked by transactionId — one for a normal transaction, two for a
++     * transfer), then recalculate each affected account's later balance
++     * entries forward from the balance that existed just before it.
++     * Transactions without a linked entry (e.g. SMS transactions carrying an
++     * explicit bank balance) fall back to a delta reversal on the latest
++     * balance, with the correct credit-card sign.
++     */
+     private suspend fun reverseBalanceForDeletion(transaction: TransactionEntity) {
++        val linkedEntries = accountBalanceRepository.getBalancesByTransactionId(transaction.id)
++        if (linkedEntries.isNotEmpty()) {
++            // Group by account so each account is recalculated once, from the
++            // earliest deleted entry on that account.
++            val byAccount = linkedEntries.groupBy { it.bankName to it.accountLast4 }
++            for (entry in linkedEntries) {
++                accountBalanceRepository.deleteBalance(entry)
++            }
++            for ((account, entries) in byAccount) {
++                val (bankName, accountLast4) = account
++                val earliest = entries.minByOrNull { it.timestamp } ?: continue
++                val previous = accountBalanceRepository
++                    .getLatestBalanceOnOrBefore(bankName, accountLast4, earliest.timestamp)
++                val startingBalance = previous?.balance ?: BigDecimal.ZERO
++                accountBalanceRepository.recalculateBalancesAfter(
++                    bankName, accountLast4, earliest.timestamp.minusNanos(1), startingBalance
++                )
++            }
++            return
++        }
++        reverseSingleAccountFallback(transaction)
++    }
++
++    private suspend fun reverseSingleAccountFallback(transaction: TransactionEntity) {
+         val bankName = transaction.bankName ?: return
+         val accountLast4 = transaction.accountNumber ?: return
+         val latestBalance = accountBalanceRepository.getLatestBalance(bankName, accountLast4) ?: return
+         val currentBalance = latestBalance.balance
+-
++        val isCard = latestBalance.isCreditCard
+         val reversedBalance = when (transaction.transactionType) {
+-            TransactionType.CREDIT, TransactionType.INCOME, TransactionType.BORROWED -> currentBalance - transaction.amount
+-            TransactionType.EXPENSE, TransactionType.INVESTMENT, TransactionType.LENT -> currentBalance + transaction.amount
++            TransactionType.CREDIT, TransactionType.INCOME, TransactionType.BORROWED ->
++                if (isCard) currentBalance + transaction.amount else currentBalance - transaction.amount
++            TransactionType.EXPENSE, TransactionType.INVESTMENT, TransactionType.LENT ->
++                if (isCard) currentBalance - transaction.amount else currentBalance + transaction.amount
+             else -> currentBalance
+         }.max(BigDecimal.ZERO)
+ 
+@@ -212,33 +259,26 @@ class TransactionRepository @Inject constructor(
+     }
+ 
+     private suspend fun applyBalanceForTransaction(transaction: TransactionEntity) {
++        // Undo of a delete: re-create the transaction's balance entry at its
++        // own date through insertTransactionBalance, which also recalculates
++        // all later balances forward — the mirror image of the delete fix.
+         val bankName = transaction.bankName ?: return
+         val accountLast4 = transaction.accountNumber ?: return
+-        val latestBalance = accountBalanceRepository.getLatestBalance(bankName, accountLast4) ?: return
+-        val currentBalance = latestBalance.balance
+-
+-        val newBalance = when (transaction.transactionType) {
+-            TransactionType.CREDIT, TransactionType.INCOME, TransactionType.BORROWED -> currentBalance + transaction.amount
+-            TransactionType.EXPENSE, TransactionType.INVESTMENT, TransactionType.LENT -> (currentBalance - transaction.amount).max(BigDecimal.ZERO)
+-            else -> currentBalance
+-        }
+-
+-        val balanceEntity = AccountBalanceEntity(
++        if (transaction.transactionType == TransactionType.TRANSFER ||
++            transaction.transactionType == TransactionType.BALANCE_UPDATE) return
++        accountBalanceRepository.insertTransactionBalance(
+             bankName = bankName,
+             accountLast4 = accountLast4,
+-            balance = newBalance,
+-            timestamp = LocalDateTime.now(),
+-            transactionId = null,
+-            creditLimit = latestBalance.creditLimit,
+-            isCreditCard = latestBalance.isCreditCard,
+-            iconResId = latestBalance.iconResId,
+-            iconName = latestBalance.iconName,
+-            isWallet = latestBalance.isWallet,
+-            color = latestBalance.color,
+-            currency = transaction.currency,
+-            sourceType = "UNDO_REVERSAL"
++            amount = transaction.amount,
++            transactionType = transaction.transactionType,
++            explicitBalance = transaction.balanceAfter,
++            timestamp = transaction.dateTime,
++            transactionId = transaction.id,
++            creditLimit = null,
++            isCreditCard = false,
++            smsSource = null,
++            currency = transaction.currency
+         )
+-        accountBalanceRepository.insertBalance(balanceEntity)
+     }
+ 
+     suspend fun updateCategoryForMerchant(merchantName: String, newCategory: String) {
+diff --git a/app/src/main/java/com/ritesh/cashiro/data/service/LiteRtLmServiceImpl.kt b/app/src/main/java/com/ritesh/cashiro/data/service/LiteRtLmServiceImpl.kt
+deleted file mode 100644
+index 70b6755..0000000
+--- a/app/src/main/java/com/ritesh/cashiro/data/service/LiteRtLmServiceImpl.kt
++++ /dev/null
+@@ -1,211 +0,0 @@
+-package com.ritesh.cashiro.data.service
+-
+-import android.content.Context
+-import android.util.Log
+-import com.google.ai.edge.litertlm.Backend
+-import com.google.ai.edge.litertlm.Content
+-import com.google.ai.edge.litertlm.Conversation
+-import com.google.ai.edge.litertlm.ConversationConfig
+-import com.google.ai.edge.litertlm.Engine
+-import com.google.ai.edge.litertlm.EngineConfig
+-import com.google.ai.edge.litertlm.SamplerConfig
+-import com.ritesh.cashiro.domain.service.LlmService
+-import kotlinx.coroutines.Dispatchers
+-import kotlinx.coroutines.flow.Flow
+-import kotlinx.coroutines.flow.catch
+-import kotlinx.coroutines.flow.flow
+-import kotlinx.coroutines.flow.flowOn
+-import kotlinx.coroutines.flow.map
+-import kotlinx.coroutines.withContext
+-import java.io.File
+-
+-private const val TAG = "LiteRtLmServiceImpl"
+-
+-/**
+- * LiteRT-LM (com.google.ai.edge.litertlm) implementation of [LlmService].
+- *
+- * LiteRT-LM (com.google.ai.edge.litertlm) framework supporting .litertlm models (e.g. Qwen2.5-1.5B-Instruct).
+- *
+- * Hardware backend: GPU (OpenCL) is attempted first, falling back to CPU when
+- * libOpenCL.so is unavailable on the device.
+- *
+- * Sampler defaults (tuned for financial transaction parsing):
+- *   - topK = 10       → focused, near-deterministic token selection
+- *   - topP = 0.95     → nucleus sampling with slight variation
+- *   - temperature = 0.8 → reduces hallucinations for structured data extraction
+- *
+- * Lifecycle is managed by [com.ritesh.cashiro.di.LlmModule] which constructs this
+- * class as a Singleton when BuildConfig.USE_LITERT_LM = true.
+- */
+-class LiteRtLmServiceImpl(
+-    private val context: Context
+-) : LlmService {
+-
+-    private var engine: Engine? = null
+-    private var conversation: Conversation? = null
+-
+-    /** Returns true once [initialize] has successfully loaded the model. */
+-    override fun isInitialized(): Boolean = engine != null
+-
+-    /**
+-     * Loads the model from [modelPath] into the LiteRT-LM runtime.
+-     * Must be called on a background thread (dispatches to [Dispatchers.IO]).
+-     *
+-     * GPU (OpenCL) is attempted first; falls back silently to CPU on failure.
+-     */
+-    override suspend fun initialize(modelPath: String): Result<Unit> = withContext(Dispatchers.IO) {
+-        if (engine != null) {
+-            Log.d(TAG, "Already initialized — skipping.")
+-            return@withContext Result.success(Unit)
+-        }
+-
+-        val cacheDir = File(context.cacheDir, "litert_lm_cache").also { it.mkdirs() }
+-
+-        // Build a priority-ordered list of backends to attempt.
+-        // GPU (OpenCL) is tried first when available; CPU is always the final fallback.
+-        val preferredBackend = resolveBackend()
+-        val backendsToTry: List<Backend> = if (preferredBackend is Backend.CPU) {
+-            listOf(preferredBackend)
+-        } else {
+-            listOf(preferredBackend, Backend.CPU())
+-        }
+-
+-        var lastException: Throwable? = null
+-        for (backend in backendsToTry) {
+-            try {
+-                val config = EngineConfig(
+-                    modelPath = modelPath,
+-                    backend = backend,
+-                    cacheDir = cacheDir.absolutePath
+-                )
+-                Log.d(TAG, "Initializing LiteRT-LM engine. backend=$backend, model=$modelPath")
+-                engine = Engine(config).also { it.initialize() }
+-                Log.d(TAG, "LiteRT-LM engine initialized successfully with backend=$backend")
+-
+-                conversation = engine!!.createConversation(buildConversationConfig())
+-                Log.d(TAG, "Conversation session created.")
+-                return@withContext Result.success(Unit)
+-            } catch (t: Throwable) {
+-                // Must catch Throwable, not Exception: native/JNI failures surface as
+-                // UnsatisfiedLinkError (System.loadLibrary), ExceptionInInitializerError
+-                // (NativeLibraryLoader runs in LiteRtLmJni.<clinit>), NoClassDefFoundError,
+-                // and OutOfMemoryError on a ~1.5 GB model — none of which are Exceptions.
+-                // Catching only Exception would let exactly the failures this loop exists to
+-                // recover from propagate past it and defeat the CPU fallback.
+-                Log.w(TAG, "Backend $backend failed (${t.javaClass.simpleName}: ${t.message}) — trying next backend if available.")
+-                lastException = t
+-                engine = null
+-                conversation = null
+-            }
+-        }
+-
+-        Log.e(TAG, "All backends failed to initialize LiteRT-LM engine", lastException)
+-        Result.failure(lastException ?: Exception("All backends failed"))
+-    }
+-
+-    /**
+-     * Blocking single-shot response generation.
+-     * Collects the streaming flow and concatenates all text chunks into one string.
+-     */
+-    override suspend fun generateResponse(prompt: String): Result<String> =
+-        withContext(Dispatchers.IO) {
+-            try {
+-                val sb = StringBuilder()
+-                generateResponseStream(prompt).collect { chunk -> sb.append(chunk) }
+-                Result.success(sb.toString())
+-            } catch (t: Throwable) {
+-                if (t is kotlinx.coroutines.CancellationException) throw t
+-                Log.e(TAG, "generateResponse error", t)
+-                com.ritesh.cashiro.utils.CrashHandler.triggerCrash(context, t)
+-                Result.failure(t)
+-            }
+-        }
+-
+-    /**
+-     * Streaming response via Kotlin [Flow].
+-     * Each emission is a partial text chunk extracted from the model's [Message].
+-     *
+-     * [Conversation.sendMessageAsync] returns a [Flow] of [Message] objects.
+-     * Each [Message] carries a [Contents] bag of [Content] parts; we collect only
+-     * [Content.Text] parts and join them into a single string per emission.
+-     */
+-    override fun generateResponseStream(prompt: String): Flow<String> = flow {
+-        val conv = conversation
+-            ?: throw IllegalStateException("LiteRT-LM not initialized. Call initialize() first.")
+-
+-        Log.d(TAG, "Sending message (first 80 chars): ${prompt.take(80)}…")
+-
+-        conv.sendMessageAsync(prompt)
+-            .map { message ->
+-                // Extract all text parts from the Message's Contents bag
+-                message.contents.contents
+-                    .filterIsInstance<Content.Text>()
+-                    .joinToString("") { it.text }
+-            }
+-            .collect { textChunk ->
+-                if (textChunk.isNotEmpty()) emit(textChunk)
+-            }
+-    }.catch { e ->
+-        if (e is kotlinx.coroutines.CancellationException) throw e
+-        Log.e(TAG, "Fatal error in LiteRT-LM stream", e)
+-        // Route unhandled native/JNI flow exceptions to our crash screen
+-        com.ritesh.cashiro.utils.CrashHandler.triggerCrash(context, e)
+-        throw e // Re-throw to cancel the flow
+-    }.flowOn(Dispatchers.IO)
+-
+-    /**
+-     * Resets the active conversation session WITHOUT unloading the engine.
+-     * Call this at the start of each new chat to clear the model's internal KV-cache history.
+-     */
+-    override suspend fun resetConversation(): Unit = withContext(Dispatchers.IO) {
+-        Log.d(TAG, "Resetting conversation (keeping engine loaded).")
+-        try { conversation?.close() } catch (_: Exception) { }
+-        conversation = engine?.createConversation(buildConversationConfig())
+-        Log.d(TAG, "Conversation reset. New session ready.")
+-    }
+-
+-    /**
+-     * Closes the active conversation and shuts down the engine.
+-     * After reset, [initialize] must be called again before using the service.
+-     */
+-    override suspend fun reset() = withContext(Dispatchers.IO) {
+-        Log.d(TAG, "Resetting LiteRT-LM engine.")
+-        try { conversation?.close() } catch (_: Exception) { }
+-        conversation = null
+-        try { engine?.close() } catch (_: Exception) { }
+-        engine = null
+-    }
+-
+-    // ──────────────────────────────────────────────────────────────────
+-    // Private helpers
+-    // ──────────────────────────────────────────────────────────────────
+-
+-    /**
+-     * Attempts to load OpenCL native library to confirm GPU availability.
+-     * Falls back to CPU backend silently when OpenCL is absent.
+-     */
+-    private fun resolveBackend(): Backend {
+-        return try {
+-            System.loadLibrary("OpenCL")
+-            Log.d(TAG, "OpenCL available — using GPU backend.")
+-            Backend.GPU()
+-        } catch (e: UnsatisfiedLinkError) {
+-            Log.d(TAG, "OpenCL not available — using CPU backend.")
+-            Backend.CPU()
+-        }
+-    }
+-
+-    /**
+-     * Builds a [ConversationConfig] with a [SamplerConfig] suited for financial parsing.
+-     *
+-     * Note: [SamplerConfig] takes [Double] parameters (not Float).
+-     */
+-    private fun buildConversationConfig(): ConversationConfig {
+-        val sampler = SamplerConfig(
+-            topK = 10,
+-            topP = 0.95,
+-            temperature = 0.3  // Lower temperature = more focused, less hallucinatory output
+-        )
+-        return ConversationConfig(samplerConfig = sampler)
+-    }
+-}
+diff --git a/app/src/main/java/com/ritesh/cashiro/di/LlmModule.kt b/app/src/main/java/com/ritesh/cashiro/di/LlmModule.kt
+deleted file mode 100644
+index 0508b62..0000000
+--- a/app/src/main/java/com/ritesh/cashiro/di/LlmModule.kt
++++ /dev/null
+@@ -1,24 +0,0 @@
+-package com.ritesh.cashiro.di
+-
+-import android.content.Context
+-import com.ritesh.cashiro.data.service.LiteRtLmServiceImpl
+-import com.ritesh.cashiro.domain.service.LlmService
+-import dagger.Module
+-import dagger.Provides
+-import dagger.hilt.InstallIn
+-import dagger.hilt.android.qualifiers.ApplicationContext
+-import dagger.hilt.components.SingletonComponent
+-import javax.inject.Singleton
+-
+-@Module
+-@InstallIn(SingletonComponent::class)
+-object LlmModule {
+-
+-    @Provides
+-    @Singleton
+-    fun provideLlmService(
+-        @ApplicationContext context: Context
+-    ): LlmService {
+-        return LiteRtLmServiceImpl(context)
+-    }
+-}
+diff --git a/app/src/main/java/com/ritesh/cashiro/domain/service/LlmService.kt b/app/src/main/java/com/ritesh/cashiro/domain/service/LlmService.kt
+deleted file mode 100644
+index a7d5ff0..0000000
+--- a/app/src/main/java/com/ritesh/cashiro/domain/service/LlmService.kt
++++ /dev/null
+@@ -1,13 +0,0 @@
+-package com.ritesh.cashiro.domain.service
+-
+-import kotlinx.coroutines.flow.Flow
+-
+-interface LlmService {
+-    suspend fun initialize(modelPath: String): Result<Unit>
+-    suspend fun generateResponse(prompt: String): Result<String>
+-    fun generateResponseStream(prompt: String): Flow<String>
+-    suspend fun reset()
+-    /** Resets the conversation history without unloading the model engine. */
+-    suspend fun resetConversation()
+-    fun isInitialized(): Boolean
+-}
+\ No newline at end of file
+diff --git a/app/src/main/java/com/ritesh/cashiro/presentation/navigation/CashiroNavHost.kt b/app/src/main/java/com/ritesh/cashiro/presentation/navigation/CashiroNavHost.kt
+index 3ab8abb..f226b17 100644
+--- a/app/src/main/java/com/ritesh/cashiro/presentation/navigation/CashiroNavHost.kt
++++ b/app/src/main/java/com/ritesh/cashiro/presentation/navigation/CashiroNavHost.kt
+@@ -81,7 +81,6 @@ import com.ritesh.cashiro.presentation.ui.features.budgets.BudgetDetailScreen
+ import com.ritesh.cashiro.presentation.ui.features.budgets.BudgetHistoryScreen
+ import com.ritesh.cashiro.presentation.ui.features.budgets.BudgetsScreen
+ import com.ritesh.cashiro.presentation.ui.features.categories.CategoriesScreen
+-import com.ritesh.cashiro.presentation.ui.features.chat.ChatScreen
+ import com.ritesh.cashiro.presentation.ui.features.contacts.ContactsScreen
+ import com.ritesh.cashiro.presentation.ui.features.home.HomeScreen
+ import com.ritesh.cashiro.presentation.ui.features.home.HomeViewModel
+@@ -228,7 +227,7 @@ fun CashiroNavHost(
+                     HomeScreen(
+                         navController = navController,
+                         onNavigateToSettings = { navController.safeNavigate(Settings) },
+-                        onNavigateToChat = { navController.safeNavigate(Chat) },
++                        onNavigateToChat = {}, // AI chat removed in this build
+                         onNavigateToTransactions = { navController.safeNavigate(Transactions()) },
+                         onNavigateToTransactionsWithSearch = {
+                             navController.safeNavigate(Transactions(focusSearch = true))
+@@ -276,19 +275,7 @@ fun CashiroNavHost(
+                     )
+                 }
+ 
+-                // Chat Screen
+-                composable<Chat>(
+-                    enterTransition = CashiroTransitions.verticalSlideEnter,
+-                    exitTransition = CashiroTransitions.verticalSlideExit,
+-                    popEnterTransition = CashiroTransitions.verticalSlidePopEnter,
+-                    popExitTransition = CashiroTransitions.verticalSlidePopExit
+-                ) {
+-                    ChatScreen(
+-                        modifier = Modifier.imePadding(),
+-                        onNavigateToSettings = { navController.safeNavigate(Settings) },
+-                        onNavigateBack = { navController.safePopBackStack() }
+-                    )
+-                }
++                // Chat Screen removed: Cashiro AI removed in this build.
+ 
+                 /* SETTINGS & SUB-SCREENS ---- */
+                 composable<Settings>(
+@@ -1120,21 +1107,8 @@ fun CashiroNavHost(
+                                 color = MaterialTheme.colorScheme.surface.copy(0.6f)
+                             )
+ 
+-                            if (com.ritesh.cashiro.core.Constants.Device.is64Bit) {
+-                                DropdownMenuItem(
+-                                    text = { Text(
+-                                        text = askAiLbl,
+-                                        style = MaterialTheme.typography.bodyMedium,
+-                                        color = MaterialTheme.colorScheme.onSurface
+-                                    ) },
+-                                    onClick = {
+-                                        view.performHapticFeedback(HapticFeedbackConstants.VIRTUAL_KEY)
+-                                        dismiss()
+-                                        navController.safeNavigate(Chat)
+-                                    },
+-                                    leadingIcon = { Icon(Iconax.AiCommentary, contentDescription = null) }
+-                                )
+-                            }
++                            // Ask AI removed: Cashiro AI removed in this build.
++                            
+                         } else if (isTransactionsScreen) {
+                             DropdownMenuItem(
+                                 text = { Text(exportLbl) },
+@@ -1163,17 +1137,8 @@ fun CashiroNavHost(
+                                 thickness = 1.5.dp,
+                                 color = MaterialTheme.colorScheme.surface.copy(0.6f)
+                             )
+-                            if (com.ritesh.cashiro.core.Constants.Device.is64Bit) {
+-                                DropdownMenuItem(
+-                                    text = { Text(askAiLbl) },
+-                                    onClick = {
+-                                        view.performHapticFeedback(HapticFeedbackConstants.VIRTUAL_KEY)
+-                                        dismiss()
+-                                        navController.safeNavigate(Chat)
+-                                    },
+-                                    leadingIcon = { Icon(Iconax.AiCommentary, contentDescription = null) }
+-                                )
+-                            }
++                            // Ask AI removed: Cashiro AI removed in this build.
++                            
+                         }
+                     }
+                 )
+diff --git a/app/src/main/java/com/ritesh/cashiro/presentation/ui/features/categories/CategoriesScreen.kt b/app/src/main/java/com/ritesh/cashiro/presentation/ui/features/categories/CategoriesScreen.kt
+index ff12bcc..885bc57 100644
+--- a/app/src/main/java/com/ritesh/cashiro/presentation/ui/features/categories/CategoriesScreen.kt
++++ b/app/src/main/java/com/ritesh/cashiro/presentation/ui/features/categories/CategoriesScreen.kt
+@@ -483,7 +483,7 @@ fun CategoriesScreen(
+                 onReset = if (editingCategory?.isSystem == true) {
+                     { categoryId -> categoriesViewModel.resetCategory(categoryId) }
+                 } else null,
+-                onDelete = if (editingCategory != null && !editingCategory!!.isSystem) {
++                onDelete = if (editingCategory != null) {
+                     { categoriesViewModel.deleteCategory(editingCategory!!) }
+                 } else null
+             )
+diff --git a/app/src/main/java/com/ritesh/cashiro/presentation/ui/features/categories/CategoriesViewModel.kt b/app/src/main/java/com/ritesh/cashiro/presentation/ui/features/categories/CategoriesViewModel.kt
+index 0b80d4a..9dfee8a 100644
+--- a/app/src/main/java/com/ritesh/cashiro/presentation/ui/features/categories/CategoriesViewModel.kt
++++ b/app/src/main/java/com/ritesh/cashiro/presentation/ui/features/categories/CategoriesViewModel.kt
+@@ -187,8 +187,11 @@ constructor(
+     }
+ 
+     fun deleteCategory(category: CategoryEntity) {
+-        if (category.isSystem) {
+-            _snackbarMessage.value = "System categories cannot be deleted"
++        // Built-in categories CAN be deleted in this build — except
++        // "Miscellaneous", which is the app's default category for new
++        // expenses and the fallback other categories' transactions move to.
++        if (category.name == "Miscellaneous") {
++            _snackbarMessage.value = "Miscellaneous is the default category and cannot be deleted"
+             return
+         }
+ 
+@@ -312,10 +315,7 @@ constructor(
+     }
+ 
+     fun deleteSubcategory(subcategory: SubcategoryEntity) {
+-        if (subcategory.isSystem) {
+-            _snackbarMessage.value = "System subcategories cannot be deleted"
+-            return
+-        }
++        // Built-in subcategories can be deleted too in this build.
+ 
+         viewModelScope.launch {
+             try {
+diff --git a/app/src/main/java/com/ritesh/cashiro/presentation/ui/features/categories/EditCategorySheet.kt b/app/src/main/java/com/ritesh/cashiro/presentation/ui/features/categories/EditCategorySheet.kt
+index 1e20a7d..e6ca1ad 100644
+--- a/app/src/main/java/com/ritesh/cashiro/presentation/ui/features/categories/EditCategorySheet.kt
++++ b/app/src/main/java/com/ritesh/cashiro/presentation/ui/features/categories/EditCategorySheet.kt
+@@ -336,8 +336,8 @@ fun EditCategorySheet(
+                 horizontalArrangement = Arrangement.spacedBy(12.dp),
+                 verticalAlignment = Alignment.CenterVertically
+             ) {
+-                // Delete button (only for non-system categories)
+-                if (onDelete != null && category != null && !category.isSystem) {
++                // Delete button (all categories in this build, incl. built-in)
++                if (onDelete != null && category != null) {
+                     OutlinedButton(
+                         onClick = { onDelete() },
+                         modifier = Modifier.height(56.dp),
+diff --git a/app/src/main/java/com/ritesh/cashiro/presentation/ui/features/categories/EditSubcategorySheet.kt b/app/src/main/java/com/ritesh/cashiro/presentation/ui/features/categories/EditSubcategorySheet.kt
+index 9942ba5..8ea6ba4 100644
+--- a/app/src/main/java/com/ritesh/cashiro/presentation/ui/features/categories/EditSubcategorySheet.kt
++++ b/app/src/main/java/com/ritesh/cashiro/presentation/ui/features/categories/EditSubcategorySheet.kt
+@@ -239,8 +239,8 @@ fun EditSubcategorySheet(
+                 horizontalArrangement = Arrangement.spacedBy(12.dp),
+                 verticalAlignment = Alignment.CenterVertically
+             ) {
+-                // Delete button (only for non-system subcategories)
+-                if (onDelete != null && subcategory != null && !subcategory.isSystem) {
++                // Delete button (all subcategories in this build, incl. built-in)
++                if (onDelete != null && subcategory != null) {
+                     OutlinedButton(
+                         onClick = { showDeleteConfirmation = true },
+                         modifier = Modifier.height(56.dp),
+diff --git a/app/src/main/java/com/ritesh/cashiro/presentation/ui/features/chat/ChatErrorMapper.kt b/app/src/main/java/com/ritesh/cashiro/presentation/ui/features/chat/ChatErrorMapper.kt
+deleted file mode 100644
+index 842e659..0000000
+--- a/app/src/main/java/com/ritesh/cashiro/presentation/ui/features/chat/ChatErrorMapper.kt
++++ /dev/null
+@@ -1,51 +0,0 @@
+-package com.ritesh.cashiro.presentation.ui.features.chat
+-
+-/**
+- * Maps raw [Throwable] messages from the on-device LLM runtime into strings that are
+- * meaningful to a user.
+- *
+- * JNI and class-loading failures routinely surface with a bare class name or an opaque
+- * linker string as the exception message (for example a `NoClassDefFoundError` whose
+- * message is just the class it failed to load). Neither tells a user anything actionable,
+- * so they are replaced with a generic prompt. Human-readable messages pass through
+- * untouched so genuine failures remain diagnosable from the UI.
+- */
+-internal object ChatErrorMapper {
+-
+-    /**
+-     * Matches a string that is *nothing but* a Java class name — fully qualified
+-     * (`com.example.Foo`), bare (`Foo`), or nested (`Foo$Companion`).
+-     *
+-     * Requires the final segment to start uppercase, which is what distinguishes a real
+-     * class name from a lowercase dotted identifier such as `connection.timed.out`.
+-     */
+-    private val CLASS_NAME_ONLY = Regex("^([a-zA-Z_$][a-zA-Z0-9_$]*\\.)*[A-Z][a-zA-Z0-9_$]*$")
+-
+-    fun friendly(t: Throwable): String {
+-        val msg = t.message ?: ""
+-        return when {
+-            // LinkageError covers UnsatisfiedLinkError, NoClassDefFoundError and
+-            // ExceptionInInitializerError — all native/class-loading failures that the
+-            // user cannot act on beyond restarting.
+-            t is LinkageError -> ENGINE_FAILED
+-            // Defensive: no LiteRT-LM native library dlopens these, but a future
+-            // dependency could reintroduce them.
+-            msg.contains("dlopen") || msg.contains("litertlm_jni") -> ENGINE_FAILED
+-            msg.contains("not initialized") -> NOT_READY
+-            // A message that is only a class name means an init/linkage failure leaked
+-            // its own class name as the message.
+-            CLASS_NAME_ONLY.matches(msg) -> UNEXPECTED_RESTART
+-            msg.isBlank() -> UNEXPECTED_RETRY
+-            else -> msg
+-        }
+-    }
+-
+-    private const val ENGINE_FAILED =
+-        "AI inference engine failed to load. Please restart the app and try again."
+-    private const val NOT_READY =
+-        "AI model is not ready yet. Please wait a moment and try again."
+-    private const val UNEXPECTED_RESTART =
+-        "An unexpected error occurred. Please restart the app."
+-    private const val UNEXPECTED_RETRY =
+-        "An unexpected error occurred. Please try again."
+-}
+diff --git a/app/src/main/java/com/ritesh/cashiro/presentation/ui/features/chat/ChatScreen.kt b/app/src/main/java/com/ritesh/cashiro/presentation/ui/features/chat/ChatScreen.kt
+deleted file mode 100644
+index 2526349..0000000
+--- a/app/src/main/java/com/ritesh/cashiro/presentation/ui/features/chat/ChatScreen.kt
++++ /dev/null
+@@ -1,1197 +0,0 @@
+-package com.ritesh.cashiro.presentation.ui.features.chat
+-
+-import android.content.ClipData
+-import android.content.ClipboardManager
+-import android.widget.Toast
+-import androidx.compose.animation.AnimatedVisibility
+-import androidx.compose.animation.animateContentSize
+-import androidx.compose.animation.core.RepeatMode
+-import androidx.compose.animation.core.animateFloat
+-import androidx.compose.animation.core.infiniteRepeatable
+-import androidx.compose.animation.core.keyframes
+-import androidx.compose.animation.core.rememberInfiniteTransition
+-import androidx.compose.animation.expandVertically
+-import androidx.compose.animation.fadeIn
+-import androidx.compose.animation.fadeOut
+-import androidx.compose.animation.shrinkVertically
+-import androidx.compose.foundation.ExperimentalFoundationApi
+-import androidx.compose.foundation.background
+-import androidx.compose.foundation.clickable
+-import androidx.compose.foundation.combinedClickable
+-import androidx.compose.foundation.layout.Arrangement
+-import androidx.compose.foundation.layout.Box
+-import androidx.compose.foundation.layout.Column
+-import androidx.compose.foundation.layout.PaddingValues
+-import androidx.compose.foundation.layout.Row
+-import androidx.compose.foundation.layout.Spacer
+-import androidx.compose.foundation.layout.fillMaxSize
+-import androidx.compose.foundation.layout.fillMaxWidth
+-import androidx.compose.foundation.layout.height
+-import androidx.compose.foundation.layout.navigationBarsPadding
+-import androidx.compose.foundation.layout.padding
+-import androidx.compose.foundation.layout.size
+-import androidx.compose.foundation.layout.width
+-import androidx.compose.foundation.layout.widthIn
+-import androidx.compose.foundation.lazy.LazyColumn
+-import androidx.compose.foundation.lazy.items
+-import androidx.compose.foundation.lazy.rememberLazyListState
+-import androidx.compose.foundation.shape.RoundedCornerShape
+-import androidx.compose.material.icons.Icons
+-import androidx.compose.material.icons.outlined.ContentCopy
+-import androidx.compose.material.icons.outlined.Delete
+-import androidx.compose.material.icons.outlined.Edit
+-import androidx.compose.material.icons.outlined.Search
+-import androidx.compose.material.icons.rounded.Add
+-import androidx.compose.material.icons.rounded.Close
+-import androidx.compose.material.icons.rounded.CloudDownload
+-import androidx.compose.material.icons.rounded.Code
+-import androidx.compose.material.icons.rounded.Error
+-import androidx.compose.material.icons.rounded.ExpandLess
+-import androidx.compose.material.icons.rounded.ExpandMore
+-import androidx.compose.material.icons.rounded.History
+-import androidx.compose.material.icons.rounded.MoreHoriz
+-import androidx.compose.material.icons.rounded.Refresh
+-import androidx.compose.material.icons.rounded.Stop
+-import androidx.compose.material.icons.rounded.Warning
+-import androidx.compose.material3.Button
+-import androidx.compose.material3.ButtonDefaults
+-import androidx.compose.material3.Card
+-import androidx.compose.material3.CardDefaults
+-import androidx.compose.material3.DropdownMenu
+-import androidx.compose.material3.DropdownMenuItem
+-import androidx.compose.material3.ExperimentalMaterial3Api
+-import androidx.compose.material3.ExperimentalMaterial3ExpressiveApi
+-import androidx.compose.material3.FilledIconButton
+-import androidx.compose.material3.HorizontalDivider
+-import androidx.compose.material3.Icon
+-import androidx.compose.material3.IconButton
+-import androidx.compose.material3.IconButtonDefaults
+-import androidx.compose.material3.LinearProgressIndicator
+-import androidx.compose.material3.ListItem
+-import androidx.compose.material3.MaterialTheme
+-import androidx.compose.material3.ModalBottomSheet
+-import androidx.compose.material3.Scaffold
+-import androidx.compose.material3.Surface
+-import androidx.compose.material3.Text
+-import androidx.compose.material3.TextButton
+-import androidx.compose.material3.TextField
+-import androidx.compose.material3.TextFieldDefaults
+-import androidx.compose.material3.TopAppBarDefaults
+-import androidx.compose.material3.rememberModalBottomSheetState
+-import androidx.compose.runtime.Composable
+-import androidx.compose.runtime.LaunchedEffect
+-import androidx.compose.runtime.getValue
+-import androidx.compose.runtime.mutableStateOf
+-import androidx.compose.runtime.remember
+-import androidx.compose.runtime.rememberCoroutineScope
+-import androidx.compose.runtime.setValue
+-import androidx.compose.ui.Alignment
+-import androidx.compose.ui.Modifier
+-import androidx.compose.ui.draw.BlurredEdgeTreatment
+-import androidx.compose.ui.draw.clip
+-import androidx.compose.ui.focus.FocusRequester
+-import androidx.compose.ui.focus.focusRequester
+-import androidx.compose.ui.graphics.Brush
+-import androidx.compose.ui.graphics.Color
+-import androidx.compose.ui.graphics.graphicsLayer
+-import androidx.compose.ui.input.nestedscroll.nestedScroll
+-import androidx.compose.ui.platform.LocalContext
+-import androidx.compose.ui.res.painterResource
+-import androidx.compose.ui.res.stringResource
+-import androidx.compose.ui.text.TextRange
+-import androidx.compose.ui.text.font.FontWeight
+-import androidx.compose.ui.text.input.TextFieldValue
+-import androidx.compose.ui.text.style.TextAlign
+-import androidx.compose.ui.unit.dp
+-import androidx.hilt.lifecycle.viewmodel.compose.hiltViewModel
+-import androidx.lifecycle.compose.collectAsStateWithLifecycle
+-import com.mikepenz.markdown.m3.Markdown
+-import com.mikepenz.markdown.m3.markdownTypography
+-import com.ritesh.cashiro.R
+-import com.ritesh.cashiro.data.database.entity.ChatMessage
+-import com.ritesh.cashiro.data.repository.ModelState
+-import com.ritesh.cashiro.presentation.effects.overScrollVertical
+-import com.ritesh.cashiro.presentation.effects.rememberOverscrollFlingBehavior
+-import com.ritesh.cashiro.presentation.ui.components.CustomTitleTopAppBar
+-import com.ritesh.cashiro.presentation.ui.components.LoadingCircle
+-import com.ritesh.cashiro.presentation.ui.components.LoadingLine
+-import com.ritesh.cashiro.presentation.ui.components.SearchBarBox
+-import com.ritesh.cashiro.presentation.ui.features.categories.NavigationContent
+-import com.ritesh.cashiro.presentation.ui.icons.Bag
+-import com.ritesh.cashiro.presentation.ui.icons.Iconax
+-import com.ritesh.cashiro.presentation.ui.icons.Send
+-import com.ritesh.cashiro.presentation.ui.theme.Dimensions
+-import com.ritesh.cashiro.presentation.ui.theme.LocalBlurEffects
+-import com.ritesh.cashiro.presentation.ui.theme.Spacing
+-import com.ritesh.cashiro.utils.TokenUtils
+-import dev.chrisbanes.haze.HazeDefaults
+-import dev.chrisbanes.haze.HazeEffectScope
+-import dev.chrisbanes.haze.HazeState
+-import dev.chrisbanes.haze.HazeTint
+-import dev.chrisbanes.haze.hazeEffect
+-import dev.chrisbanes.haze.hazeSource
+-import kotlinx.coroutines.launch
+-import java.text.SimpleDateFormat
+-import java.util.Date
+-import java.util.Locale
+-
+-@OptIn(ExperimentalMaterial3Api::class, ExperimentalMaterial3ExpressiveApi::class)
+-@Composable
+-fun ChatScreen(
+-    modifier: Modifier = Modifier,
+-    chatViewModel: ChatViewModel = hiltViewModel(),
+-    onNavigateToSettings: () -> Unit,
+-    onNavigateBack: () -> Unit
+-) {
+-    val messages by chatViewModel.messages.collectAsStateWithLifecycle()
+-    val modelState by chatViewModel.modelState.collectAsStateWithLifecycle()
+-    val uiState by chatViewModel.uiState.collectAsStateWithLifecycle()
+-    val currentResponse by chatViewModel.currentResponse.collectAsStateWithLifecycle()
+-    val isTokenInfoEnabled by chatViewModel.isTokenInfoEnabled.collectAsStateWithLifecycle()
+-    val chatStats by chatViewModel.chatStats.collectAsStateWithLifecycle()
+-    val chatSessions by chatViewModel.chatSessions.collectAsStateWithLifecycle()
+-    val currentSessionId by chatViewModel.currentSessionId.collectAsStateWithLifecycle()
+-    
+-    var inputText by remember { mutableStateOf(TextFieldValue("")) }
+-    var editingMessageId by remember { mutableStateOf<String?>(null) }
+-    var searchQuery by remember { mutableStateOf(TextFieldValue("")) }
+-    val listState = rememberLazyListState()
+-    val scope = rememberCoroutineScope()
+-    val focusRequester = remember { FocusRequester() }
+-    var showMenu by remember { mutableStateOf(false) }
+-    
+-    var showHistorySheet by remember { mutableStateOf(false) }
+-    val sheetState = rememberModalBottomSheetState(skipPartiallyExpanded = false)
+-
+-    val context = LocalContext.current
+-    val blurEffects = LocalBlurEffects.current
+-    
+-    // Only auto-scroll on new messages, not on initial load
+-    var isInitialLoad by remember { mutableStateOf(true) }
+-    
+-    // Collect toast events
+-    LaunchedEffect(Unit) {
+-        chatViewModel.toastEvent.collect { message ->
+-            Toast.makeText(context, message, Toast.LENGTH_SHORT).show()
+-        }
+-    }
+-    
+-    // Auto-scroll to bottom when new messages arrive
+-    LaunchedEffect(messages.size, currentResponse) {
+-        if (isInitialLoad) {
+-            isInitialLoad = false
+-            return@LaunchedEffect
+-        }
+-        if (messages.isNotEmpty() || currentResponse.isNotEmpty()) {
+-            scope.launch {
+-                listState.animateScrollToItem(
+-                    index = if (currentResponse.isNotEmpty()) messages.size else messages.size - 1
+-                )
+-            }
+-        }
+-    }
+-
+-    val scrollBehavior = TopAppBarDefaults.exitUntilCollapsedScrollBehavior()
+-    val scrollBehaviorSmall = TopAppBarDefaults.pinnedScrollBehavior()
+-    val hazeState = remember { HazeState() }
+-    val dropContainerColor = MaterialTheme.colorScheme.surfaceContainerHigh
+-    Scaffold(
+-        modifier = Modifier.nestedScroll(scrollBehavior.nestedScrollConnection),
+-        topBar = {
+-            CustomTitleTopAppBar(
+-                title = stringResource(R.string.cashiro_ai),
+-                scrollBehaviorSmall = scrollBehaviorSmall,
+-                scrollBehaviorLarge = scrollBehavior,
+-                hazeState = hazeState,
+-                hasBackButton = true,
+-                hasActionButton = true,
+-                navigationContent = {NavigationContent(onNavigateBack)},
+-                actionContent = {
+-                    Box {
+-                        IconButton(
+-                            onClick = { showMenu = true },
+-                            colors = IconButtonDefaults.iconButtonColors(
+-                                containerColor = MaterialTheme.colorScheme.surfaceContainer,
+-                                contentColor = MaterialTheme.colorScheme.onBackground
+-                            ),
+-                            shapes =  IconButtonDefaults.shapes(),
+-                            modifier = Modifier.padding(end =Spacing.md)
+-                        ) {
+-                            Icon(
+-                                imageVector = Icons.Rounded.MoreHoriz,
+-                                contentDescription = stringResource(R.string.more_options),
+-                                modifier = Modifier.size(20.dp)
+-                            )
+-                        }
+-                        DropdownMenu(
+-                            expanded = showMenu,
+-                            onDismissRequest = { showMenu = false },modifier = Modifier
+-                                .clip(RoundedCornerShape(24.dp))
+-                                .then(
+-                                    if (blurEffects) Modifier.hazeEffect(
+-                                        state = hazeState,
+-                                        block = fun HazeEffectScope.() {
+-                                            style = HazeDefaults.style(
+-                                                backgroundColor = Color.Transparent,
+-                                                tint = HazeTint(dropContainerColor.copy(0.5f)),
+-                                                blurRadius = 36.dp,
+-                                                noiseFactor = -1f,
+-                                            )
+-                                            blurredEdgeTreatment = BlurredEdgeTreatment.Unbounded
+-                                        }
+-                                    ) else Modifier
+-                                ),
+-                            containerColor = dropContainerColor.copy(
+-                                alpha = if (blurEffects) 0.7f else 1f
+-                            ),
+-                            shape = RoundedCornerShape(24.dp)
+-                        ) {
+-                            DropdownMenuItem(
+-                                text = { Text(stringResource(R.string.new_chat)) },
+-                                onClick = {
+-                                    showMenu = false
+-                                    chatViewModel.startNewChat()
+-                                },
+-                                leadingIcon = {
+-                                    Icon(Icons.Rounded.Add, contentDescription = null)
+-                                }
+-                            )
+-                            HorizontalDivider(
+-                                thickness = 1.5.dp,
+-                                color = MaterialTheme.colorScheme.surface.copy(0.6f)
+-                            )
+-                            DropdownMenuItem(
+-                                text = { Text(stringResource(R.string.chat_history)) },
+-                                onClick = {
+-                                    showMenu = false
+-                                    showHistorySheet = true
+-                                },
+-                                leadingIcon = {
+-                                    Icon(Icons.Rounded.History, contentDescription = null)
+-                                }
+-                            )
+-                            HorizontalDivider(
+-                                thickness = 1.5.dp,
+-                                color = MaterialTheme.colorScheme.surface.copy(0.6f)
+-                            )
+-                            DropdownMenuItem(
+-                                text = { Text(stringResource(R.string.clear_chat)) },
+-                                onClick = {
+-                                    showMenu = false
+-                                    chatViewModel.clearChat()
+-                                },
+-                                leadingIcon = {
+-                                    Icon(Icons.Outlined.Delete, contentDescription = null)
+-                                },
+-                                enabled = messages.isNotEmpty()
+-                            )
+-                        }
+-                    }
+-                },
+-                extraInfoCard = {
+-                    // Developer info card
+-                    if(isTokenInfoEnabled && messages.isNotEmpty()) {
+-                        DeveloperInfoCard(
+-                            chatStats = chatStats,
+-                            modifier = Modifier.padding(end =Spacing.md)
+-                        )
+-                    }
+-                }
+-            )
+-        },
+-
+-    ) { paddingValues ->
+-        Box(
+-            modifier = modifier.fillMaxSize()
+-        ) {
+-            when (modelState) {
+-                ModelState.NOT_DOWNLOADED, ModelState.ERROR -> {
+-                    // Show existing messages if any, but disable input
+-                    Column(
+-                        modifier = Modifier
+-                            .fillMaxSize()
+-                            .padding(top = paddingValues.calculateTopPadding(), bottom = paddingValues.calculateBottomPadding())
+-                    ) {
+-                        // If no messages, show the download prompt centered
+-                        if (messages.isEmpty()) {
+-                            Box(
+-                                modifier = Modifier
+-                                    .weight(1f)
+-                                    .fillMaxWidth(),
+-                                contentAlignment = Alignment.Center
+-                            ) {
+-                                Column(
+-                                    horizontalAlignment = Alignment.CenterHorizontally,
+-                                    verticalArrangement = Arrangement.spacedBy(Spacing.md)
+-                                ) {
+-                                    Icon(
+-                                        Icons.Rounded.CloudDownload,
+-                                        contentDescription = null,
+-                                        modifier = Modifier.size(64.dp),
+-                                        tint = MaterialTheme.colorScheme.primary
+-                                    )
+-                                    Text(
+-                                        text = stringResource(R.string.qwen_model_required),
+-                                        style = MaterialTheme.typography.headlineSmall
+-                                    )
+-                                    Text(
+-                                        text = stringResource(R.string.download_ai_model_prompt),
+-                                        style = MaterialTheme.typography.bodyMedium,
+-                                        textAlign = TextAlign.Center,
+-                                        color = MaterialTheme.colorScheme.onSurfaceVariant
+-                                    )
+-                                    Button(onClick = onNavigateToSettings) {
+-                                        Text(stringResource(R.string.go_to_settings))
+-                                    }
+-                                }
+-                            }
+-                        } else {
+-                            // Show existing messages (read-only)
+-                            LazyColumn(
+-                                state = listState,
+-                                modifier = Modifier
+-                                    .weight(1f)
+-                                    .hazeSource(hazeState)
+-                                    .fillMaxWidth()
+-                                    .overScrollVertical(),
+-                                flingBehavior = rememberOverscrollFlingBehavior { listState },
+-                                contentPadding = PaddingValues(
+-                                    start = Dimensions.Padding.content,
+-                                    end = Dimensions.Padding.content,
+-                                    top = Dimensions.Padding.content,
+-                                    bottom = Spacing.lg
+-                                ),
+-                                verticalArrangement = Arrangement.spacedBy(Spacing.sm)
+-                            ) {
+-                                items(messages) { message ->
+-                                    ChatMessageItem(
+-                                        message = message,
+-                                        onCopy = {
+-                                            val clipboardManager = context.getSystemService(android.content.Context.CLIPBOARD_SERVICE) as ClipboardManager
+-                                            clipboardManager.setPrimaryClip(ClipData.newPlainText(context.getString(R.string.copied_text), it.message))
+-                                        },
+-                                        onDelete = { chatViewModel.deleteMessage(it.id) },
+-                                        onEdit = {
+-                                            editingMessageId = it.id
+-                                            inputText = TextFieldValue(
+-                                                text = it.message,
+-                                                selection = TextRange(it.message.length)
+-                                            )
+-                                            focusRequester.requestFocus()
+-                                        },
+-                                        onRegenerate = { chatViewModel.regenerateMessage(it.id) }
+-                                    )
+-                                }
+-                            }
+-                        }
+-
+-                        // Show model required banner at bottom
+-                        Surface(
+-                            modifier = Modifier.fillMaxWidth(),
+-                            color = MaterialTheme.colorScheme.tertiaryContainer,
+-                            tonalElevation = 3.dp
+-                        ) {
+-                            Row(
+-                                modifier = Modifier
+-                                    .fillMaxWidth()
+-                                    .padding(Dimensions.Padding.content),
+-                                verticalAlignment = Alignment.CenterVertically,
+-                                horizontalArrangement = Arrangement.SpaceBetween
+-                            ) {
+-                                Column(modifier = Modifier.weight(1f)) {
+-                                    Text(
+-                                        text = stringResource(R.string.model_required),
+-                                        style = MaterialTheme.typography.titleSmall,
+-                                        fontWeight = FontWeight.Bold
+-                                    )
+-                                    Text(
+-                                        text = stringResource(R.string.download_to_continue_chatting),
+-                                        style = MaterialTheme.typography.bodySmall
+-                                    )
+-                                }
+-                                Button(
+-                                    onClick = onNavigateToSettings,
+-                                    modifier = Modifier.padding(start = Spacing.sm)
+-                                ) {
+-                                    Text(stringResource(R.string.download))
+-                                }
+-                            }
+-                        }
+-                    }
+-                }
+-
+-                ModelState.DOWNLOADING -> {
+-                    Box(
+-                        modifier = Modifier
+-                            .fillMaxSize()
+-                            .padding(paddingValues),
+-                        contentAlignment = Alignment.Center
+-                    ) {
+-                        Column(
+-                            modifier = Modifier
+-                                .fillMaxWidth()
+-                                .padding(horizontal = Spacing.xl),
+-                            horizontalAlignment = Alignment.CenterHorizontally,
+-                            verticalArrangement = Arrangement.spacedBy(Spacing.md)
+-                        ) {
+-                            LoadingCircle(modifier = Modifier.size(64.dp))
+-                            Text(
+-                                text = stringResource(R.string.downloading_model_format, uiState.downloadProgress),
+-                                style = MaterialTheme.typography.bodyLarge
+-                            )
+-                            LoadingLine(
+-                                modifier = Modifier
+-                                    .fillMaxWidth()
+-                                    .height(Spacing.xs)
+-                                    .clip(RoundedCornerShape(Spacing.xs)),
+-                                progress = uiState.downloadProgress / 100f
+-                            )
+-                            Text(
+-                                text = stringResource(R.string.check_settings_for_more_details),
+-                                style = MaterialTheme.typography.bodySmall,
+-                                color = MaterialTheme.colorScheme.onSurfaceVariant
+-                            )
+-                        }
+-                    }
+-                }
+-
+-                ModelState.READY, ModelState.LOADING -> {
+-                    // Show loading overlay when model is loading
+-                    if (modelState == ModelState.LOADING) {
+-                        Box(
+-                            modifier = Modifier.fillMaxSize(),
+-                            contentAlignment = Alignment.Center
+-                        ) {
+-                            Column(
+-                                horizontalAlignment = Alignment.CenterHorizontally,
+-                                verticalArrangement = Arrangement.spacedBy(Spacing.md)
+-                            ) {
+-                                LoadingCircle()
+-                                Text(
+-                                    text = stringResource(R.string.initializing_ai_model),
+-                                    style = MaterialTheme.typography.bodyLarge
+-                                )
+-                                Text(
+-                                    text = stringResource(R.string.this_may_take_a_few_seconds),
+-                                    style = MaterialTheme.typography.bodyMedium,
+-                                    color = MaterialTheme.colorScheme.onSurfaceVariant
+-                                )
+-                            }
+-                        }
+-                    } else {
+-                        Box(
+-                            modifier = Modifier
+-                                .fillMaxWidth(),
+-                            contentAlignment = Alignment.BottomCenter
+-                        ){
+-                            Column{
+-                                // Messages list
+-                                LazyColumn(
+-                                    state = listState,
+-                                    modifier = Modifier
+-                                        .weight(1f)
+-                                        .hazeSource(hazeState)
+-                                        .fillMaxWidth()
+-                                        .clip( CardDefaults.shape)
+-                                        .overScrollVertical(),
+-                                    flingBehavior = rememberOverscrollFlingBehavior { listState },
+-                                    contentPadding = PaddingValues(
+-                                        start = Dimensions.Padding.content,
+-                                        end = Dimensions.Padding.content,
+-                                        top = Dimensions.Padding.content + paddingValues.calculateTopPadding(),
+-                                        bottom = Dimensions.Padding.content
+-                                    ),
+-                                    verticalArrangement = Arrangement.spacedBy(Spacing.sm),
+-                                    reverseLayout = false
+-                                ) {
+-                                    items(messages) { message ->
+-                                        ChatMessageItem(
+-                                            message = message,
+-                                            onCopy = {
+-                                                val clipboardManager = context.getSystemService(android.content.Context.CLIPBOARD_SERVICE) as ClipboardManager
+-                                                clipboardManager.setPrimaryClip(ClipData.newPlainText(context.getString(R.string.copied_text), it.message))
+-                                            },
+-                                            onDelete = { chatViewModel.deleteMessage(it.id) },
+-                                            onEdit = {
+-                                                editingMessageId = it.id
+-                                                inputText = TextFieldValue(
+-                                                    text = it.message,
+-                                                    selection = TextRange(it.message.length)
+-                                                )
+-                                                focusRequester.requestFocus()
+-                                            },
+-                                            onRegenerate = { chatViewModel.regenerateMessage(it.id) }
+-                                        )
+-                                    }
+-
+-                                    // Show streaming response if available
+-                                    if (currentResponse.isNotEmpty()) {
+-                                        item {
+-                                            ChatMessageItem(
+-                                                message = ChatMessage(
+-                                                    message = currentResponse,
+-                                                    isUser = false,
+-                                                    timestamp = System.currentTimeMillis()
+-                                                ),
+-                                                isStreaming = true
+-                                            )
+-                                        }
+-                                    } else if (uiState.isLoading) {
+-                                        // Show typing indicator while waiting for response
+-                                        item {
+-                                            TypingIndicator()
+-                                        }
+-                                    }
+-                                    item{
+-                                        Spacer(modifier = Modifier.height(180.dp))
+-                                    }
+-                                }
+-                            }
+-
+-                            Column(
+-                                modifier = Modifier
+-                                    .align(Alignment.BottomCenter)
+-                                    .fillMaxWidth()
+-                            ) {
+-                                // Error message
+-                                AnimatedVisibility(
+-                                    visible = uiState.error != null,
+-                                    enter = expandVertically() + fadeIn(),
+-                                    exit = shrinkVertically() + fadeOut()
+-                                ) {
+-                                    Card(
+-                                        modifier = Modifier
+-                                            .fillMaxWidth()
+-                                            .padding(horizontal = Dimensions.Padding.content),
+-                                        colors = CardDefaults.cardColors(
+-                                            containerColor = MaterialTheme.colorScheme.errorContainer
+-                                        )
+-                                    ) {
+-                                        Row(
+-                                            modifier = Modifier
+-                                                .fillMaxWidth()
+-                                                .padding(Dimensions.Padding.content),
+-                                            horizontalArrangement = Arrangement.SpaceBetween,
+-                                            verticalAlignment = Alignment.CenterVertically
+-                                        ) {
+-                                            Text(
+-                                                text = uiState.error ?: "",
+-                                                style = MaterialTheme.typography.bodyMedium,
+-                                                color = MaterialTheme.colorScheme.onErrorContainer,
+-                                                modifier = Modifier.weight(1f)
+-                                            )
+-                                            IconButton(onClick = { chatViewModel.clearError() }) {
+-                                                Icon(
+-                                                    Icons.Rounded.Close,
+-                                                    contentDescription = stringResource(R.string.dismiss),
+-                                                    tint = MaterialTheme.colorScheme.onErrorContainer
+-                                                )
+-                                            }
+-                                        }
+-                                    }
+-                                }
+-
+-                                // Token limit warning
+-                                AnimatedVisibility(
+-                                    visible = chatStats.contextUsagePercent >= 80,
+-                                    enter = expandVertically() + fadeIn(),
+-                                    exit = shrinkVertically() + fadeOut()
+-                                ) {
+-                                    TokenLimitWarning(
+-                                        usagePercent = chatStats.contextUsagePercent,
+-                                        onClearChat = { chatViewModel.clearChat() }
+-                                    )
+-                                }
+-
+-                                // Input field
+-                                Box(
+-                                    modifier = Modifier
+-                                        .fillMaxWidth()
+-                                        .background(
+-                                            Brush.verticalGradient(
+-                                                colors = listOf(
+-                                                    Color.Transparent,
+-                                                    MaterialTheme.colorScheme.surface,
+-                                                )
+-                                            )
+-                                        )
+-                                        .navigationBarsPadding(),
+-                                ) {
+-                                    Row(
+-                                        modifier = Modifier
+-                                            .fillMaxWidth()
+-                                            .padding(Dimensions.Padding.content),
+-                                        verticalAlignment = Alignment.Bottom
+-                                    ) {
+-                                        TextField(
+-                                            value = inputText,
+-                                            onValueChange = { inputText = it },
+-                                            placeholder = { Text(stringResource(R.string.ask_about_expenses_placeholder)) },
+-                                            enabled = !uiState.isLoading,
+-                                            singleLine = true,
+-                                            modifier = Modifier
+-                                                .weight(1f)
+-                                                .focusRequester(focusRequester),
+-                                            shape = RoundedCornerShape(Spacing.xxl),
+-                                            colors = TextFieldDefaults.colors(
+-                                                focusedContainerColor = MaterialTheme.colorScheme.surfaceContainerLow,
+-                                                unfocusedContainerColor = MaterialTheme.colorScheme.surfaceContainerLow,
+-                                                focusedIndicatorColor = Color.Transparent,
+-                                                unfocusedIndicatorColor = Color.Transparent,
+-                                                focusedLabelColor = MaterialTheme.colorScheme.primary,
+-                                                unfocusedPlaceholderColor = MaterialTheme.colorScheme.onSurfaceVariant.copy(
+-                                                    0.7f
+-                                                )
+-                                            ),
+-                                            trailingIcon = {
+-                                                FilledIconButton(
+-                                                    onClick = {
+-                                                        if (uiState.isLoading) {
+-                                                            chatViewModel.stopGeneration()
+-                                                        } else {
+-                                                            if (editingMessageId != null) {
+-                                                                chatViewModel.editMessage(editingMessageId!!, inputText.text)
+-                                                                editingMessageId = null
+-                                                            } else {
+-                                                                chatViewModel.sendMessage(inputText.text)
+-                                                            }
+-                                                            inputText = TextFieldValue("")
+-                                                            // Keep keyboard open by requesting focus
+-                                                            focusRequester.requestFocus()
+-                                                        }
+-                                                    },
+-                                                    enabled = uiState.isLoading || inputText.text.isNotBlank(),
+-                                                    modifier = Modifier
+-                                                        .size(48.dp)
+-                                                        .padding(Spacing.xs)
+-                                                ) {
+-                                                    if (uiState.isLoading) {
+-                                                        Icon(
+-                                                            Icons.Rounded.Stop,
+-                                                            contentDescription = stringResource(R.string.stop),
+-                                                            modifier = Modifier.size(24.dp)
+-                                                        )
+-                                                    } else {
+-                                                        Icon(
+-                                                            Iconax.Send,
+-                                                            contentDescription = stringResource(R.string.send),
+-                                                            modifier = Modifier.size(18.dp)
+-                                                        )
+-                                                    }
+-                                                }
+-                                            }
+-                                        )
+-                                    }
+-                                }
+-                            }
+-                        }
+-                    }
+-                }
+-            }
+-        }
+-    }
+-    
+-    // Chat History Bottom Sheet
+-    if (showHistorySheet) {
+-        ModalBottomSheet(
+-            onDismissRequest = { showHistorySheet = false },
+-            sheetState = sheetState,
+-            containerColor = MaterialTheme.colorScheme.surface,
+-        ) {
+-            Column(modifier = Modifier.padding(16.dp)) {
+-                Text(
+-                    text = stringResource(R.string.chat_history),
+-                    style = MaterialTheme.typography.titleMedium,
+-                    textAlign = TextAlign.Center,
+-                    modifier = Modifier.fillMaxWidth().padding(bottom = 16.dp)
+-                )
+-                SearchBarBox(
+-                    searchQuery = searchQuery,
+-                    onSearchQueryChange = { searchQuery = it },
+-                    modifier = Modifier.padding(bottom = 16.dp),
+-                    label = { Text(stringResource(R.string.search_chats)) },
+-                    leadingIcon = { Icon(Icons.Outlined.Search, contentDescription = null) }
+-                )
+-                LazyColumn {
+-                    val filteredSessions = chatSessions.filter { 
+-                        it.title.contains(searchQuery.text, ignoreCase = true) 
+-                    }
+-                    items(filteredSessions) { session ->
+-                        val isSelected = session.id == currentSessionId
+-                        ListItem(
+-                            modifier = Modifier.clickable {
+-                                chatViewModel.loadSession(session.id)
+-                                showHistorySheet = false
+-                            },
+-                            headlineContent = { Text(session.title, fontWeight = if (isSelected) FontWeight.Bold else null) },
+-                            supportingContent = { Text(java.text.DateFormat.getDateTimeInstance(java.text.DateFormat.SHORT, java.text.DateFormat.SHORT).format(Date(session.createdAt))) },
+-                            trailingContent = {
+-                                IconButton(onClick = { chatViewModel.deleteSession(session.id) }) {
+-                                    Icon(
+-                                        Iconax.Bag,
+-contentDescription = stringResource(R.string.delete),
+-                                        tint = MaterialTheme.colorScheme.error
+-                                    )
+-                                }
+-                            }
+-                        )
+-                    }
+-                }
+-            }
+-        }
+-    }
+-}
+-
+-@OptIn(ExperimentalMaterial3Api::class)
+-@Composable
+-fun TokenLimitWarning(
+-    usagePercent: Int,
+-    onClearChat: () -> Unit,
+-    modifier: Modifier = Modifier
+-) {
+-    val backgroundColor = when {
+-        usagePercent >= 95 -> MaterialTheme.colorScheme.errorContainer
+-        usagePercent >= 90 -> Color(0xFFFFF3E0) // Orange container
+-        else -> MaterialTheme.colorScheme.secondaryContainer
+-    }
+-    
+-    val contentColor = when {
+-        usagePercent >= 95 -> MaterialTheme.colorScheme.onErrorContainer
+-        usagePercent >= 90 -> Color(0xFF5D4037) // Dark orange
+-        else -> MaterialTheme.colorScheme.onSecondaryContainer
+-    }
+-    
+-    val icon = when {
+-        usagePercent >= 95 -> Icons.Rounded.Error
+-        else -> Icons.Rounded.Warning
+-    }
+-    
+-    val message = when {
+-        usagePercent >= 95 -> stringResource(R.string.chat_memory_full_warning)
+-        usagePercent >= 90 -> stringResource(R.string.chat_memory_almost_full_warning_format, usagePercent)
+-        else -> stringResource(R.string.chat_memory_usage_format, usagePercent)
+-    }
+-    
+-    Surface(
+-        modifier = modifier.fillMaxWidth(),
+-        color = backgroundColor,
+-        tonalElevation = 2.dp
+-    ) {
+-        Row(
+-            modifier = Modifier
+-                .fillMaxWidth()
+-                .padding(Dimensions.Padding.content),
+-            verticalAlignment = Alignment.CenterVertically,
+-            horizontalArrangement = Arrangement.SpaceBetween
+-        ) {
+-            Row(
+-                modifier = Modifier.weight(1f),
+-                verticalAlignment = Alignment.CenterVertically
+-            ) {
+-                Icon(
+-                    icon,
+-                    contentDescription = null,
+-                    tint = contentColor,
+-                    modifier = Modifier.size(20.dp)
+-                )
+-                Spacer(modifier = Modifier.width(Spacing.sm))
+-                Text(
+-                    text = message,
+-                    style = MaterialTheme.typography.bodyMedium,
+-                    color = contentColor
+-                )
+-            }
+-            if (usagePercent >= 90) {
+-                TextButton(
+-                    onClick = onClearChat,
+-                    colors = ButtonDefaults.textButtonColors(
+-                        contentColor = contentColor
+-                    )
+-                ) {
+-                    Text(stringResource(R.string.clear), fontWeight = FontWeight.Bold)
+-                }
+-            }
+-        }
+-    }
+-}
+-
+-@Composable
+-fun DeveloperInfoCard(
+-    chatStats: ChatStats,
+-    modifier: Modifier = Modifier
+-) {
+-    var isExpanded by remember { mutableStateOf(false) }
+-    val usageHint = remember(chatStats.contextUsagePercent) {
+-        TokenUtils.getUsageColorHint(chatStats.contextUsagePercent)
+-    }
+-    val usageColor = when (usageHint) {
+-        "critical" -> MaterialTheme.colorScheme.error
+-        "warning" -> MaterialTheme.colorScheme.tertiary
+-        else -> MaterialTheme.colorScheme.primary
+-    }
+-    
+-    Card(
+-        modifier = modifier
+-            .fillMaxWidth(),
+-        colors = CardDefaults.cardColors(
+-            containerColor = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.5f)
+-        ),
+-        onClick = { isExpanded = !isExpanded }
+-    ) {
+-        Column(
+-            modifier = Modifier.padding(Dimensions.Padding.content)
+-        ) {
+-            Row(
+-                modifier = Modifier.fillMaxWidth(),
+-                horizontalArrangement = Arrangement.SpaceBetween,
+-                verticalAlignment = Alignment.CenterVertically
+-            ) {
+-                Row(
+-                    horizontalArrangement = Arrangement.spacedBy(Spacing.sm),
+-                    verticalAlignment = Alignment.CenterVertically
+-                ) {
+-                    Icon(
+-                        Icons.Rounded.Code,
+-                        contentDescription = null,
+-                        modifier = Modifier.size(16.dp),
+-                        tint = MaterialTheme.colorScheme.onSurfaceVariant
+-                    )
+-                    Text(
+-                        text = stringResource(R.string.qwen_model_messages_format, chatStats.messageCount),
+-                        style = MaterialTheme.typography.labelSmall,
+-                        color = MaterialTheme.colorScheme.onSurfaceVariant
+-                    )
+-                }
+-                
+-                Row(
+-                    horizontalArrangement = Arrangement.spacedBy(Spacing.xs),
+-                    verticalAlignment = Alignment.CenterVertically
+-                ) {
+-                    Text(
+-                        text = stringResource(R.string.tokens_format, TokenUtils.formatNumber(chatStats.estimatedTokens)),
+-                        style = MaterialTheme.typography.labelSmall,
+-                        fontWeight = FontWeight.Medium,
+-                        color = usageColor
+-                    )
+-                    Icon(
+-                        if (isExpanded) Icons.Rounded.ExpandLess else Icons.Rounded.ExpandMore,
+-                        contentDescription = if (isExpanded) stringResource(R.string.collapse) else stringResource(R.string.expand),
+-                        modifier = Modifier.size(16.dp),
+-                        tint = MaterialTheme.colorScheme.onSurfaceVariant
+-                    )
+-                }
+-            }
+-            
+-            AnimatedVisibility(
+-                visible = isExpanded,
+-                enter = expandVertically() + fadeIn(),
+-                exit = shrinkVertically() + fadeOut()
+-            ) {
+-                Column(
+-                    modifier = Modifier
+-                        .fillMaxWidth()
+-                        .padding(top = Spacing.sm),
+-                    verticalArrangement = Arrangement.spacedBy(Spacing.xs)
+-                ) {
+-                    HorizontalDivider(
+-                        color = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.2f)
+-                    )
+-                    
+-                    Spacer(modifier = Modifier.height(Spacing.xs))
+-                    
+-                    // Context usage
+-                    Row(
+-                        modifier = Modifier.fillMaxWidth(),
+-                        horizontalArrangement = Arrangement.SpaceBetween
+-                    ) {
+-                        Text(
+-                            text = stringResource(R.string.context_usage),
+-                            style = MaterialTheme.typography.bodySmall,
+-                            color = MaterialTheme.colorScheme.onSurfaceVariant
+-                        )
+-                        Text(
+-                            text = stringResource(R.string.percentage_format_no_brackets, chatStats.contextUsagePercent),
+-                            style = MaterialTheme.typography.bodySmall,
+-                            fontWeight = FontWeight.Medium,
+-                            color = usageColor
+-                        )
+-                    }
+-                    
+-                    LinearProgressIndicator(
+-                        progress = { chatStats.contextUsagePercent / 100f },
+-                        modifier = Modifier
+-                            .fillMaxWidth()
+-                            .height(4.dp)
+-                            .clip(RoundedCornerShape(2.dp)),
+-                        color = usageColor,
+-                        trackColor = MaterialTheme.colorScheme.surfaceVariant,
+-                        drawStopIndicator = {}
+-                    )
+-                    
+-                    Row(
+-                        modifier = Modifier.fillMaxWidth(),
+-                        horizontalArrangement = Arrangement.SpaceBetween
+-                    ) {
+-                        Text(
+-                            text = stringResource(R.string.tokens_usage_format, TokenUtils.formatNumber(chatStats.estimatedTokens), TokenUtils.formatNumber(chatStats.maxTokens)),
+-                            style = MaterialTheme.typography.labelSmall,
+-                            color = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.7f)
+-                        )
+-                        if (chatStats.systemPromptTokens > 0) {
+-                            Text(
+-                                text = stringResource(R.string.system_tokens_format, TokenUtils.formatNumber(chatStats.systemPromptTokens)),
+-                                style = MaterialTheme.typography.labelSmall,
+-                                color = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.5f)
+-                            )
+-                        }
+-                    }
+-                }
+-            }
+-        }
+-    }
+-}
+-
+-@Composable
+-fun TypingIndicator(
+-    modifier: Modifier = Modifier
+-) {
+-    val infiniteTransition = rememberInfiniteTransition(label = "typing")
+-    val alpha by infiniteTransition.animateFloat(
+-        initialValue = 0.3f,
+-        targetValue = 1f,
+-        animationSpec = infiniteRepeatable(
+-            animation = androidx.compose.animation.core.tween(
+-                durationMillis = 1200,
+-                easing = androidx.compose.animation.core.FastOutSlowInEasing
+-            ),
+-            repeatMode = RepeatMode.Reverse
+-        ),
+-        label = "logo_alpha"
+-    )
+-    
+-    Row(
+-        modifier = modifier.fillMaxWidth(),
+-        horizontalArrangement = Arrangement.Start
+-    ) {
+-        Row(
+-            modifier = Modifier.padding(
+-                horizontal = Dimensions.Padding.content,
+-                vertical = Spacing.md
+-            ),
+-            horizontalArrangement = Arrangement.spacedBy(Spacing.sm),
+-            verticalAlignment = Alignment.CenterVertically
+-        ) {
+-            Icon(
+-                painter = painterResource(id = R.drawable.cashiro),
+-                contentDescription = null,
+-                modifier = Modifier
+-                    .size(24.dp)
+-                    .graphicsLayer(alpha = alpha),
+-                tint = MaterialTheme.colorScheme.primary
+-            )
+-            
+-            Text(
+-                text = "Thinking about your request...",
+-                style = MaterialTheme.typography.bodyMedium,
+-                color = MaterialTheme.colorScheme.onSurfaceVariant,
+-                modifier = Modifier.graphicsLayer(alpha = alpha)
+-            )
+-        }
+-    }
+-}
+-
+-@OptIn(ExperimentalFoundationApi::class)
+-@Composable
+-fun ChatMessageItem(
+-    message: ChatMessage,
+-    isStreaming: Boolean = false,
+-    onEdit: (ChatMessage) -> Unit = {},
+-    onDelete: (ChatMessage) -> Unit = {},
+-    onCopy: (ChatMessage) -> Unit = {},
+-    onRegenerate: (ChatMessage) -> Unit = {}
+-) {
+-    val timeFormat = remember { java.text.SimpleDateFormat("h:mm a", java.util.Locale.getDefault()) }
+-    var showMenu by remember { mutableStateOf(false) }
+-    var showTimestamp by remember { mutableStateOf(false) }
+-
+-    Row(
+-        modifier = Modifier.fillMaxWidth(),
+-        horizontalArrangement = if (message.isUser) Arrangement.End else Arrangement.Start
+-    ) {
+-        if (message.isUser) {
+-            Box {
+-                Card(
+-                    modifier = Modifier
+-                        .widthIn(max = 280.dp)
+-                        .animateContentSize()
+-                        .clip(
+-                            RoundedCornerShape(
+-                                topEnd = 24.dp,
+-                                topStart = 24.dp,
+-                                bottomStart = 24.dp,
+-                                bottomEnd = 8.dp
+-                            )
+-                        )
+-                        .combinedClickable(
+-                            onClick = { showTimestamp = !showTimestamp },
+-                            onLongClick = { showMenu = true }
+-                        ),
+-                    colors = CardDefaults.cardColors(
+-                        containerColor = MaterialTheme.colorScheme.primaryContainer
+-                    ),
+-                    shape = RoundedCornerShape(
+-                        topEnd = 24.dp,
+-                        topStart = 24.dp,
+-                        bottomStart = 24.dp,
+-                        bottomEnd = 8.dp
+-                    )
+-                ) {
+-                    Column(
+-                        modifier = Modifier.padding(Dimensions.Padding.content)
+-                    ) {
+-                        Text(
+-                            text = message.message,
+-                            style = MaterialTheme.typography.titleMedium,
+-                            color = MaterialTheme.colorScheme.onPrimaryContainer
+-                        )
+-                        AnimatedVisibility(visible = showTimestamp) {
+-                            Column {
+-                                Spacer(modifier = Modifier.height(Spacing.xs))
+-                                Row(
+-                                    verticalAlignment = Alignment.CenterVertically,
+-                                    horizontalArrangement = Arrangement.spacedBy(Spacing.xs)
+-                                ) {
+-                                    Text(
+-                                        text = timeFormat.format(java.util.Date(message.timestamp)),
+-                                        style = MaterialTheme.typography.labelSmall,
+-                                        color = MaterialTheme.colorScheme.onPrimaryContainer.copy(alpha = 0.7f)
+-                                    )
+-                                }
+-                            }
+-                        }
+-                    }
+-                }
+-                DropdownMenu(
+-                    expanded = showMenu,
+-                    onDismissRequest = { showMenu = false },
+-                    modifier = Modifier,
+-                    containerColor = MaterialTheme.colorScheme.surfaceContainerHigh,
+-                    shape = RoundedCornerShape(24.dp)
+-                ) {
+-                    DropdownMenuItem(
+-                        text = { Text(stringResource(R.string.copy)) },
+-                        onClick = {
+-                            showMenu = false
+-                            onCopy(message)
+-                        },
+-                        leadingIcon = { Icon(Icons.Outlined.ContentCopy, contentDescription = null) }
+-                    )
+-                    HorizontalDivider(
+-                        thickness = 1.5.dp,
+-                        color = MaterialTheme.colorScheme.surface.copy(0.6f)
+-                    )
+-                    DropdownMenuItem(
+-                        text = { Text(stringResource(R.string.edit)) },
+-                        onClick = {
+-                            showMenu = false
+-                            onEdit(message)
+-                        },
+-                        leadingIcon = { Icon(Icons.Outlined.Edit, contentDescription = null) }
+-                    )
+-                    HorizontalDivider(
+-                        thickness = 1.5.dp,
+-                        color = MaterialTheme.colorScheme.surface.copy(0.6f)
+-                    )
+-                    DropdownMenuItem(
+-                        text = { Text(stringResource(R.string.delete)) },
+-                        onClick = {
+-                            showMenu = false
+-                            onDelete(message)
+-                        },
+-                        leadingIcon = { Icon(Icons.Outlined.Delete, contentDescription = null) }
+-                    )
+-                }
+-            }
+-        } else {
+-            // AI Message Layout
+-            Column(
+-                modifier = Modifier
+-                    .fillMaxWidth()
+-                    .padding(vertical = Spacing.sm)
+-            ) {
+-                // Markdown Content
+-                Markdown(
+-                    content = message.message,
+-                    modifier = Modifier.fillMaxWidth(),
+-                    typography = markdownTypography(
+-                        h1 = MaterialTheme.typography.titleLarge.copy(fontWeight = FontWeight.Bold),
+-                        h2 = MaterialTheme.typography.titleMedium.copy(fontWeight = FontWeight.Bold),
+-                        h3 = MaterialTheme.typography.titleSmall.copy(fontWeight = FontWeight.Bold),
+-                        h4 = MaterialTheme.typography.bodyLarge.copy(fontWeight = FontWeight.Bold),
+-                        h5 = MaterialTheme.typography.bodyMedium.copy(fontWeight = FontWeight.Bold),
+-                        h6 = MaterialTheme.typography.bodySmall.copy(fontWeight = FontWeight.Bold),
+-                    )
+-                )
+-                
+-                Spacer(modifier = Modifier.height(Spacing.xs))
+-                
+-                // Bottom row with streaming indicator, time and actions
+-                Row(
+-                    modifier = Modifier.fillMaxWidth(),
+-                    horizontalArrangement = Arrangement.spacedBy(Spacing.xs),
+-                    verticalAlignment = Alignment.CenterVertically
+-                ) {
+-                    if (isStreaming) {
+-                        LoadingCircle(modifier = Modifier.size(12.dp))
+-                    }
+-                    Text(
+-                        text = timeFormat.format(Date(message.timestamp)),
+-                        style = MaterialTheme.typography.labelMedium,
+-                        color = MaterialTheme.colorScheme.onSurface.copy(0.6f)
+-                    )
+-
+-                    // Action Buttons (Only show when not streaming)
+-                    if (!isStreaming) {
+-                        Row(
+-                            horizontalArrangement = Arrangement.spacedBy(Spacing.xs)
+-                        ) {
+-                            IconButton(
+-                                onClick = { onCopy(message) },
+-                                modifier = Modifier.size(32.dp)
+-                            ) {
+-                                Icon(
+-                                    imageVector = Icons.Outlined.ContentCopy,
+-                                    contentDescription = stringResource(R.string.copy),
+-                                    modifier = Modifier.size(16.dp),
+-                                    tint = MaterialTheme.colorScheme.onSurface.copy(0.6f)
+-                                )
+-                            }
+-                            IconButton(
+-                                onClick = { onRegenerate(message) },
+-                                modifier = Modifier.size(32.dp)
+-                            ) {
+-                                Icon(
+-                                    imageVector = Icons.Rounded.Refresh,
+-                                    contentDescription = stringResource(R.string.regenerate),
+-                                    modifier = Modifier.size(16.dp),
+-                                    tint = MaterialTheme.colorScheme.onSurface.copy(0.6f)
+-                                )
+-                            }
+-                            IconButton(
+-                                onClick = { onDelete(message) },
+-                                modifier = Modifier.size(32.dp)
+-                            ) {
+-                                Icon(
+-                                    imageVector = Iconax.Bag,
+-                                    contentDescription = stringResource(R.string.delete),
+-                                    modifier = Modifier.size(16.dp),
+-                                    tint = MaterialTheme.colorScheme.error.copy(0.6f)
+-                                )
+-                            }
+-                        }
+-                    }
+-                }
+-            }
+-        }
+-    }
+-}
+diff --git a/app/src/main/java/com/ritesh/cashiro/presentation/ui/features/chat/ChatViewModel.kt b/app/src/main/java/com/ritesh/cashiro/presentation/ui/features/chat/ChatViewModel.kt
+deleted file mode 100644
+index 1aade27..0000000
+--- a/app/src/main/java/com/ritesh/cashiro/presentation/ui/features/chat/ChatViewModel.kt
++++ /dev/null
+@@ -1,389 +0,0 @@
+-package com.ritesh.cashiro.presentation.ui.features.chat
+-
+-import android.util.Log
+-import androidx.lifecycle.ViewModel
+-import androidx.lifecycle.viewModelScope
+-import com.ritesh.cashiro.data.database.entity.ChatMessage
+-import com.ritesh.cashiro.data.database.entity.ChatSession
+-import com.ritesh.cashiro.data.repository.LlmRepository
+-import com.ritesh.cashiro.data.repository.ModelRepository
+-import com.ritesh.cashiro.data.repository.ModelState
+-import com.ritesh.cashiro.data.preferences.UserPreferencesRepository
+-import com.ritesh.cashiro.utils.TokenUtils
+-import dagger.hilt.android.lifecycle.HiltViewModel
+-import kotlinx.coroutines.flow.MutableSharedFlow
+-import kotlinx.coroutines.flow.MutableStateFlow
+-import kotlinx.coroutines.flow.SharedFlow
+-import kotlinx.coroutines.flow.SharingStarted
+-import kotlinx.coroutines.flow.StateFlow
+-import kotlinx.coroutines.flow.asSharedFlow
+-import kotlinx.coroutines.flow.asStateFlow
+-import kotlinx.coroutines.flow.catch
+-import kotlinx.coroutines.flow.combine
+-import kotlinx.coroutines.flow.stateIn
+-import kotlinx.coroutines.flow.flatMapLatest
+-import kotlinx.coroutines.ExperimentalCoroutinesApi
+-import kotlinx.coroutines.launch
+-import java.util.UUID
+-import javax.inject.Inject
+-
+-@HiltViewModel
+-class ChatViewModel @Inject constructor(
+-    private val llmRepository: LlmRepository,
+-    private val modelRepository: ModelRepository,
+-    private val userPreferencesRepository: UserPreferencesRepository
+-) : ViewModel() {
+-    
+-    private val _toastEvent = MutableSharedFlow<String>()
+-    val toastEvent: SharedFlow<String> = _toastEvent.asSharedFlow()
+-    
+-    private val _contextMessage = MutableStateFlow<ChatMessage?>(null)
+-    
+-    private var currentGenerationJob: kotlinx.coroutines.Job? = null
+-    
+-    private val _currentSessionId = MutableStateFlow("legacy_session")
+-    val currentSessionId: StateFlow<String> = _currentSessionId.asStateFlow()
+-    
+-    val chatSessions: StateFlow<List<ChatSession>> = llmRepository.getAllSessions()
+-        .stateIn(
+-            scope = viewModelScope,
+-            started = SharingStarted.WhileSubscribed(5000),
+-            initialValue = emptyList()
+-        )
+-    
+-    @OptIn(ExperimentalCoroutinesApi::class)
+-    val messages: StateFlow<List<ChatMessage>> = _currentSessionId.flatMapLatest { sessionId ->
+-        combine(
+-            llmRepository.getMessagesForSession(sessionId),
+-            _contextMessage
+-        ) { dbMessages, contextMsg ->
+-            if (dbMessages.isEmpty() && contextMsg != null) {
+-                // Show context message only when chat is empty
+-                listOf(contextMsg)
+-            } else {
+-                dbMessages
+-            }
+-        }
+-    }.stateIn(
+-        scope = viewModelScope,
+-        started = SharingStarted.WhileSubscribed(5000),
+-        initialValue = emptyList()
+-    )
+-    
+-    val modelState: StateFlow<ModelState> = modelRepository.modelState
+-        .stateIn(
+-            scope = viewModelScope,
+-            started = SharingStarted.WhileSubscribed(5000),
+-            initialValue = if (modelRepository.isModelDownloaded()) ModelState.READY else ModelState.NOT_DOWNLOADED
+-        )
+-    
+-    private val _uiState = MutableStateFlow(ChatUiState())
+-    val uiState: StateFlow<ChatUiState> = combine(
+-        _uiState,
+-        modelRepository.downloadProgress
+-    ) { state, progress ->
+-        state.copy(downloadProgress = progress)
+-    }.stateIn(
+-        scope = viewModelScope,
+-        started = SharingStarted.WhileSubscribed(5000),
+-        initialValue = ChatUiState()
+-    )
+-    
+-    private val _currentResponse = MutableStateFlow("")
+-    val currentResponse: StateFlow<String> = _currentResponse.asStateFlow()
+-    
+-    val isTokenInfoEnabled = userPreferencesRepository.isTokenInfoEnabled
+-        .stateIn(
+-            scope = viewModelScope,
+-            started = SharingStarted.WhileSubscribed(5000),
+-            initialValue = false
+-        )
+-    
+-    // Get all messages including system for accurate token count
+-    @OptIn(ExperimentalCoroutinesApi::class)
+-    private val allMessagesIncludingSystem = _currentSessionId.flatMapLatest { sessionId -> 
+-        llmRepository.getAllMessagesIncludingSystemForSession(sessionId)
+-    }.stateIn(
+-        scope = viewModelScope,
+-        started = SharingStarted.WhileSubscribed(5000),
+-        initialValue = emptyList()
+-    )
+-    
+-    // Chat statistics for developer mode
+-    val chatStats = combine(
+-        allMessagesIncludingSystem,
+-        currentResponse,
+-        userPreferencesRepository.getSystemPrompt()
+-    ) { allMsgs, current, systemPromptText ->
+-        // Calculate system prompt tokens separately
+-        val actualSystemPromptText = systemPromptText ?: ""
+-        val systemPromptTokens = if (actualSystemPromptText.isNotEmpty()) {
+-            TokenUtils.estimateTokens(actualSystemPromptText)
+-        } else {
+-            0
+-        }
+-        
+-        // Calculate total tokens
+-        val allText = actualSystemPromptText + " " + allMsgs.filter { !it.isSystemPrompt }.joinToString(" ") { it.message } + " " + current
+-        val totalChars = allText.length
+-        val estimatedTokens = TokenUtils.estimateTokens(allText)
+-        val maxTokens = 4096 // Qwen 2.5 with KV cache size 4096
+-        
+-        // Count only visible messages for UI
+-        val visibleCount = allMsgs.count { !it.isSystemPrompt }
+-        
+-        ChatStats(
+-            messageCount = visibleCount,
+-            totalCharacters = totalChars,
+-            estimatedTokens = estimatedTokens,
+-            systemPromptTokens = systemPromptTokens,
+-            maxTokens = maxTokens,
+-            contextUsagePercent = TokenUtils.calculateContextUsagePercent(estimatedTokens, maxTokens)
+-        )
+-    }.stateIn(
+-        scope = viewModelScope,
+-        started = SharingStarted.WhileSubscribed(5000),
+-        initialValue = ChatStats()
+-    )
+-    
+-    init {
+-        Log.d("ChatViewModel", "Initializing ChatViewModel")
+-        modelRepository.checkModelState()
+-        
+-        // Log initial state
+-        val isDownloaded = modelRepository.isModelDownloaded()
+-        Log.d("ChatViewModel", "Initial model downloaded check: $isDownloaded")
+-        
+-        // Observe model state changes
+-        viewModelScope.launch {
+-            modelRepository.modelState.collect { state ->
+-                Log.d("ChatViewModel", "Model state changed to: $state")
+-            }
+-        }
+-        
+-        // Restore last active session
+-        viewModelScope.launch {
+-            val lastSessionId = userPreferencesRepository.getLastChatSessionId()
+-            if (lastSessionId != null) {
+-                _currentSessionId.value = lastSessionId
+-            }
+-            loadContextMessage()
+-        }
+-        
+-        // Persist session ID whenever it changes
+-        viewModelScope.launch {
+-            _currentSessionId.collect { sessionId ->
+-                userPreferencesRepository.saveLastChatSessionId(sessionId)
+-            }
+-        }
+-    }
+-    
+-    private suspend fun loadContextMessage() {
+-        val contextMessage = llmRepository.getFormattedContextForDisplay()
+-        _contextMessage.value = ChatMessage(
+-            message = contextMessage,
+-            isUser = false,
+-            isSystemPrompt = false
+-        )
+-    }
+-    
+-    fun sendMessage(message: String) {
+-        if (message.isBlank() || _uiState.value.isLoading) return
+-        
+-        currentGenerationJob = viewModelScope.launch {
+-            _uiState.value = _uiState.value.copy(
+-                isLoading = true,
+-                error = null
+-            )
+-            _currentResponse.value = ""
+-            
+-            try {
+-                // Use streaming for better UX
+-                llmRepository.sendMessageStream(message, _currentSessionId.value)
+-                    .catch { error ->
+-                        Log.e("ChatViewModel", "Error in stream", error)
+-                        val errorMessage = when {
+-                            error.message?.contains("memory is full") == true -> 
+-                                "Chat memory is full. Please clear the chat to continue."
+-                            error.message?.contains("downloading") == true ->
+-                                "Model is downloading. Please wait."
+-                            error.message?.contains("not downloaded") == true ->
+-                                "AI model not downloaded. Go to Settings to download."
+-                            else -> friendlyError(error)
+-                        }
+-                        _uiState.value = _uiState.value.copy(
+-                            isLoading = false,
+-                            error = errorMessage
+-                        )
+-                    }
+-                    .collect { partialResponse ->
+-                        _currentResponse.value += partialResponse
+-                    }
+-                
+-                // Stream completed successfully
+-                Log.d("ChatViewModel", "Stream completed, resetting state")
+-                _uiState.value = _uiState.value.copy(isLoading = false)
+-                _currentResponse.value = ""
+-            } catch (e: Throwable) {
+-                if (e is kotlinx.coroutines.CancellationException) throw e
+-                Log.e("ChatViewModel", "Exception in sendMessage", e)
+-                val errorMessage = when {
+-                    e.message?.contains("memory is full") == true -> 
+-                        "Chat memory is full. Please clear the chat to continue."
+-                    e.message?.contains("downloading") == true ->
+-                        "Model is downloading. Please wait."
+-                    e.message?.contains("not downloaded") == true ->
+-                        "AI model not downloaded. Go to Settings to download."
+-                    else -> friendlyError(e)
+-                }
+-                _uiState.value = _uiState.value.copy(
+-                    isLoading = false,
+-                    error = errorMessage
+-                )
+-                _currentResponse.value = ""
+-            }
+-        }
+-    }
+-    
+-    fun clearChat() {
+-        viewModelScope.launch {
+-            llmRepository.deleteAllMessagesForSession(_currentSessionId.value)
+-            _uiState.value = _uiState.value.copy(
+-                error = null
+-            )
+-            // Reload context message after clearing chat
+-            loadContextMessage()
+-        }
+-    }
+-    
+-    fun startNewChat() {
+-        _currentSessionId.value = UUID.randomUUID().toString()
+-        _currentResponse.value = ""
+-        _uiState.value = _uiState.value.copy(error = null)
+-        viewModelScope.launch {
+-            loadContextMessage()
+-        }
+-    }
+-    
+-    fun loadSession(sessionId: String) {
+-        _currentSessionId.value = sessionId
+-        _currentResponse.value = ""
+-        _uiState.value = _uiState.value.copy(error = null)
+-        _contextMessage.value = null
+-    }
+-    
+-    fun deleteMessage(messageId: String) {
+-        viewModelScope.launch {
+-            llmRepository.deleteMessage(messageId)
+-        }
+-    }
+-    
+-    fun editMessage(messageId: String, newText: String) {
+-        viewModelScope.launch {
+-            // First edit DB and delete subsequent
+-            llmRepository.editMessage(messageId, newText)
+-            
+-            // Re-submit to trigger AI stream
+-            // But wait, the system prompt doesn't need re-sending, just send the latest user message
+-            // `sendMessageStream` might think it's a new chat if existingMessages is empty, but it's not.
+-            sendMessage(newText)
+-        }
+-    }
+-    
+-    fun regenerateMessage(messageId: String) {
+-        viewModelScope.launch {
+-            val msg = llmRepository.getMessageById(messageId) ?: return@launch
+-            if (msg.isUser) return@launch // Only regenerate AI responses
+-            
+-            // Delete AI message and all subsequent messages
+-            llmRepository.deleteMessage(messageId)
+-            llmRepository.deleteMessagesAfter(msg.sessionId, msg.timestamp)
+-            
+-            val lastUserMsg = llmRepository.getLastUserMessage(msg.sessionId)
+-            if (lastUserMsg != null) {
+-                _uiState.value = _uiState.value.copy(
+-                    isLoading = true,
+-                    error = null
+-                )
+-                _currentResponse.value = ""
+-                
+-                try {
+-                    // Start stream without inserting duplicate user message
+-                    currentGenerationJob = launch {
+-                        llmRepository.sendMessageStream(lastUserMsg.message, msg.sessionId, insertUserMessage = false)
+-                            .catch { error ->
+-                                Log.e("ChatViewModel", "Error in stream", error)
+-                                val errorMessage = when {
+-                                    error.message?.contains("memory is full") == true -> 
+-                                        "Chat memory is full. Please clear the chat to continue."
+-                                    error.message?.contains("downloading") == true ->
+-                                        "Model is downloading. Please wait."
+-                                    error.message?.contains("not downloaded") == true ->
+-                                        "AI model not downloaded. Go to Settings to download."
+-                                    else -> friendlyError(error)
+-                                }
+-                                _uiState.value = _uiState.value.copy(
+-                                    isLoading = false,
+-                                    error = errorMessage
+-                                )
+-                            }
+-                            .collect { partialResponse ->
+-                                _currentResponse.value += partialResponse
+-                            }
+-                        
+-                        Log.d("ChatViewModel", "Regenerate stream completed")
+-                        _uiState.value = _uiState.value.copy(isLoading = false)
+-                        _currentResponse.value = ""
+-                    }
+-                } catch (e: Throwable) {
+-                    if (e !is kotlinx.coroutines.CancellationException) {
+-                        Log.e("ChatViewModel", "Exception in regenerateMessage", e)
+-                        _uiState.value = _uiState.value.copy(
+-                            isLoading = false,
+-                            error = friendlyError(e)
+-                        )
+-                        _currentResponse.value = ""
+-                    } else throw e
+-                }
+-            }
+-        }
+-    }
+-    
+-    fun stopGeneration() {
+-        currentGenerationJob?.cancel()
+-        currentGenerationJob = null
+-        _uiState.value = _uiState.value.copy(isLoading = false)
+-        _currentResponse.value = ""
+-    }
+-    
+-    fun deleteSession(sessionId: String) {
+-        viewModelScope.launch {
+-            llmRepository.deleteAllMessagesForSession(sessionId)
+-            if (sessionId == _currentSessionId.value) {
+-                startNewChat()
+-            }
+-            _toastEvent.emit("Chat deleted")
+-        }
+-    }
+-
+-    fun clearError() {
+-        _uiState.value = _uiState.value.copy(error = null)
+-    }
+-
+-    private fun friendlyError(t: Throwable): String = ChatErrorMapper.friendly(t)
+-}
+-
+-data class ChatUiState(
+-    val isLoading: Boolean = false,
+-    val error: String? = null,
+-    val downloadProgress: Int = 0
+-)
+-
+-data class ChatStats(
+-    val messageCount: Int = 0,
+-    val totalCharacters: Int = 0,
+-    val estimatedTokens: Int = 0,
+-    val systemPromptTokens: Int = 0,
+-    val maxTokens: Int = 1280,
+-    val contextUsagePercent: Int = 0
+-)
+\ No newline at end of file
+diff --git a/app/src/main/java/com/ritesh/cashiro/presentation/ui/features/home/HomeViewModel.kt b/app/src/main/java/com/ritesh/cashiro/presentation/ui/features/home/HomeViewModel.kt
+index 7b91f9f..52f7d07 100644
+--- a/app/src/main/java/com/ritesh/cashiro/presentation/ui/features/home/HomeViewModel.kt
++++ b/app/src/main/java/com/ritesh/cashiro/presentation/ui/features/home/HomeViewModel.kt
+@@ -26,7 +26,6 @@ import com.ritesh.cashiro.data.repository.AccountBalanceRepository
+ import com.ritesh.cashiro.data.repository.BudgetRepository
+ import com.ritesh.cashiro.data.repository.CategoryRepository
+ import com.ritesh.cashiro.data.repository.CurrencyRepository
+-import com.ritesh.cashiro.data.repository.LlmRepository
+ import com.ritesh.cashiro.data.repository.SubcategoryRepository
+ import com.ritesh.cashiro.data.repository.SubscriptionRepository
+ import com.ritesh.cashiro.data.repository.TransactionRepository
+@@ -59,7 +58,6 @@ class HomeViewModel @Inject constructor(
+     private val transactionRepository: TransactionRepository,
+     private val subscriptionRepository: SubscriptionRepository,
+     private val accountBalanceRepository: AccountBalanceRepository,
+-    private val llmRepository: LlmRepository,
+     private val currencyConversionService: CurrencyConversionService,
+     private val currencyRepository: CurrencyRepository,
+     private val inAppUpdateManager: InAppUpdateManager,
+@@ -627,6 +625,12 @@ class HomeViewModel @Inject constructor(
+      *                    If false (default), performs an incremental scan for new messages only.
+      */
+     fun scanSmsMessages(forceResync: Boolean = false) {
++        // SMS tracking removed in this build (manual entry only):
++        // never enqueue the SMS reader worker, never scan the inbox.
++        _uiState.value = _uiState.value.copy(isScanning = false)
++        return
++        @Suppress("UNREACHABLE_CODE")
++        run {
+         val inputData = workDataOf(
+             OptimizedSmsReaderWorker.INPUT_FORCE_RESYNC to forceResync
+         )
+@@ -647,6 +651,7 @@ class HomeViewModel @Inject constructor(
+ 
+         // Track work progress
+         observeWorkProgress()
++        }
+     }
+ 
+     private fun observeWorkProgress() {
+@@ -749,15 +754,7 @@ class HomeViewModel @Inject constructor(
+         }
+     }
+ 
+-    fun updateSystemPrompt() {
+-        viewModelScope.launch {
+-            try {
+-                llmRepository.updateSystemPrompt()
+-            } catch (e: Exception) {
+-                // Handle error silently or add error state if needed
+-            }
+-        }
+-    }
++    fun updateSystemPrompt() { /* AI removed in this build: no-op */ }
+     fun hideBreakdownDialog() {
+         _uiState.value = _uiState.value.copy(showBreakdownDialog = false)
+     }
+diff --git a/app/src/main/java/com/ritesh/cashiro/presentation/ui/features/onboarding/OnBoardingViewModel.kt b/app/src/main/java/com/ritesh/cashiro/presentation/ui/features/onboarding/OnBoardingViewModel.kt
+index 8a2ec78..9b7271d 100644
+--- a/app/src/main/java/com/ritesh/cashiro/presentation/ui/features/onboarding/OnBoardingViewModel.kt
++++ b/app/src/main/java/com/ritesh/cashiro/presentation/ui/features/onboarding/OnBoardingViewModel.kt
+@@ -320,10 +320,15 @@ constructor(
+     }
+ 
+     fun startSmsScan() {
++        // SMS tracking removed (manual-entry build): never start an SMS scan.
++        return
++        @Suppress("UNREACHABLE_CODE")
++        run {
+         _uiState.update { it.copy(isScanning = true) }
+         smsScanManager.startSmsLoggingScan()
+     }
+ 
++        }
+     fun setAsMainAccount(bankName: String, accountLast4: String) {
+         val key = "${bankName}_${accountLast4}"
+         sharedPrefs.edit { putString("main_account", key) }
+diff --git a/app/src/main/java/com/ritesh/cashiro/presentation/ui/features/settings/SettingsScreen.kt b/app/src/main/java/com/ritesh/cashiro/presentation/ui/features/settings/SettingsScreen.kt
+index 0778dde..56b3edf 100644
+--- a/app/src/main/java/com/ritesh/cashiro/presentation/ui/features/settings/SettingsScreen.kt
++++ b/app/src/main/java/com/ritesh/cashiro/presentation/ui/features/settings/SettingsScreen.kt
+@@ -788,7 +788,7 @@ fun SettingsScreen(
+                     modifier = Modifier.fillMaxWidth(),
+                     verticalArrangement = Arrangement.spacedBy(1.5.dp)
+                 ) {
+-                    if (com.ritesh.cashiro.core.Constants.Device.is64Bit) {
++                    if (false) { // AI removed in this build: AI model item hidden
+                         ListItem(
+                             headline = {
+                                 Text(
+@@ -931,6 +931,8 @@ fun SettingsScreen(
+                         shape = if (com.ritesh.cashiro.core.Constants.Device.is64Bit) ListItemPosition.Middle.toShape() else ListItemPosition.Top.toShape(),
+                         padding = PaddingValues(0.dp)
+                     )
++                    // SMS settings hidden: SMS tracking removed (manual-entry build)
++                    if (false) {
+                     // SMS
+                     ListItem(
+                         headline = {
+@@ -976,6 +978,7 @@ fun SettingsScreen(
+                             else ListItemPosition.Bottom.toShape(),
+                         padding = PaddingValues(0.dp)
+                     )
++                    }
+                     if (isWebhookModeEnabled) {
+                         ListItem(
+                             headline = {
+diff --git a/app/src/main/java/com/ritesh/cashiro/worker/OptimizedSmsReaderWorker.kt b/app/src/main/java/com/ritesh/cashiro/worker/OptimizedSmsReaderWorker.kt
+index 6d55027..d1a1cd9 100644
+--- a/app/src/main/java/com/ritesh/cashiro/worker/OptimizedSmsReaderWorker.kt
++++ b/app/src/main/java/com/ritesh/cashiro/worker/OptimizedSmsReaderWorker.kt
+@@ -12,7 +12,6 @@ import com.ritesh.cashiro.BuildConfig
+ import com.ritesh.cashiro.data.database.entity.UnrecognizedSmsEntity
+ import com.ritesh.cashiro.data.preferences.UserPreferencesRepository
+ import com.ritesh.cashiro.data.repository.AccountBalanceRepository
+-import com.ritesh.cashiro.data.repository.LlmRepository
+ import com.ritesh.cashiro.data.repository.SubscriptionRepository
+ import com.ritesh.cashiro.data.repository.TransactionRepository
+ import com.ritesh.cashiro.data.repository.UnrecognizedSmsRepository
+@@ -60,7 +59,6 @@ class OptimizedSmsReaderWorker @AssistedInject constructor(
+     private val transactionRepository: TransactionRepository,
+     private val subscriptionRepository: SubscriptionRepository,
+     private val accountBalanceRepository: AccountBalanceRepository,
+-    private val llmRepository: LlmRepository,
+     private val userPreferencesRepository: UserPreferencesRepository,
+     private val unrecognizedSmsRepository: UnrecognizedSmsRepository,
+     private val smsTransactionProcessor: SmsTransactionProcessor
+@@ -267,7 +265,7 @@ class OptimizedSmsReaderWorker @AssistedInject constructor(
+             // Update system prompt with new financial data if any transactions were saved
+             if (stats.savedTransactions > 0) {
+                 try {
+-                    llmRepository.updateSystemPrompt()
++                    Unit // AI removed in this build
+                     Log.d(TAG, "Updated system prompt with latest financial data")
+                 } catch (e: Exception) {
+                     Log.e(TAG, "Error updating system prompt: ${e.message}")
+diff --git a/app/src/main/java/com/ritesh/cashiro/worker/SmsReaderWorker.kt b/app/src/main/java/com/ritesh/cashiro/worker/SmsReaderWorker.kt
+index 8c7b3b2..c3a04f4 100644
+--- a/app/src/main/java/com/ritesh/cashiro/worker/SmsReaderWorker.kt
++++ b/app/src/main/java/com/ritesh/cashiro/worker/SmsReaderWorker.kt
+@@ -18,7 +18,6 @@ import com.ritesh.cashiro.data.mapper.toEntity
+ import com.ritesh.cashiro.data.mapper.toEntityType
+ import com.ritesh.cashiro.data.repository.AccountBalanceRepository
+ import com.ritesh.cashiro.data.repository.CardRepository
+-import com.ritesh.cashiro.data.repository.LlmRepository
+ import com.ritesh.cashiro.data.repository.MerchantMappingRepository
+ import com.ritesh.cashiro.data.repository.SubscriptionRepository
+ import com.ritesh.cashiro.data.repository.TransactionRepository
+@@ -56,7 +55,6 @@ class SmsReaderWorker @AssistedInject constructor(
+     private val subscriptionRepository: SubscriptionRepository,
+     private val accountBalanceRepository: AccountBalanceRepository,
+     private val cardRepository: CardRepository,
+-    private val llmRepository: LlmRepository,
+     private val merchantMappingRepository: MerchantMappingRepository,
+     private val userPreferencesRepository: UserPreferencesRepository,
+     private val unrecognizedSmsRepository: UnrecognizedSmsRepository,
+@@ -544,7 +542,7 @@ class SmsReaderWorker @AssistedInject constructor(
+             // Update system prompt with new financial data if any transactions were saved
+             if (savedCount > 0) {
+                 try {
+-                    llmRepository.updateSystemPrompt()
++                    Unit // AI removed in this build
+                     Log.d(TAG, "Updated system prompt with latest financial data")
+                 } catch (e: Exception) {
+                     Log.e(TAG, "Error updating system prompt: ${e.message}")
+diff --git a/gradle.properties b/gradle.properties
+index ae63dad..f774c31 100644
+--- a/gradle.properties
++++ b/gradle.properties
+@@ -4,7 +4,7 @@
+ # Specifies the JVM arguments used for the daemon process.
+ # The setting is particularly useful for tweaking memory settings.
+ # Default value: -Xmx1024m -XX:MaxPermSize=256m
+-# org.gradle.jvmargs=-Xmx2048m -XX:MaxPermSize=512m -XX:+HeapDumpOnOutOfMemoryError -Dfile.encoding=UTF-8
++# org.gradle.jvmargs=-Xmx1536M -Xms256m -XX:+UseG1GC -Dfile.encoding=UTF-8
+ #
+ # When configured, Gradle will run in incubating parallel mode.
+ # This option should only be used with decoupled projects. For more details, visit
+@@ -15,17 +15,17 @@
+ #android.nonTransitiveRClass=true
+ #android.useAndroidX=true
+ #kotlin.code.style=official
+-#org.gradle.jvmargs=-Xmx6G -Dfile.encoding=UTF-8
++#org.gradle.jvmargs=-Xmx1536M -Xms256m -XX:+UseG1GC -Dfile.encoding=UTF-8
+ #kotlin.daemon.jvmargs=-Xmx6G
+ #org.gradle.daemon=true
+ #org.gradle.parallel=true
+ #org.gradle.caching=true
+ 
+ 
+-org.gradle.jvmargs=-Xmx4096M -Xms512m -Dkotlin.daemon.jvm.options\="-Xmx2048M" -XX:+UseG1GC -XX:+HeapDumpOnOutOfMemoryError -Dfile.encoding=UTF-8
++org.gradle.jvmargs=-Xmx1536M -Xms256m -XX:+UseG1GC -Dfile.encoding=UTF-8
+ android.useAndroidX=true
+ android.enableJetifier=false
+-org.gradle.unsafe.configuration-cache=true
++org.gradle.unsafe.configuration-cache=false
+ android.nonTransitiveRClass=false
+ 
+ # Jetifier is disabled - no need for ignorelist
+@@ -35,10 +35,15 @@ org.gradle.parallel=true
+ org.gradle.daemon=true
+ org.gradle.configureondemand=false
+ org.gradle.caching=true
+-org.gradle.workers.max=8
++org.gradle.workers.max=2
+ 
+ # Suppress deprecated warnings
+ android.suppressUnsupportedOptionWarnings=android.suppressUnsupportedOptionWarnings,android.nonFinalResIds
+ 
+ # Allow parallel tooling API connections (wrapper is Gradle 8.13)
+ org.gradle.tooling.parallel=true
++
++# Optimization (manual-entry build): full R8 optimization for release
++android.enableR8.fullMode=true
++kotlin.compiler.execution.strategy=in-process
++org.gradle.workers.max=2
+diff --git a/gradle/gradle-daemon-jvm.properties b/gradle/gradle-daemon-jvm.properties
+deleted file mode 100644
+index 500e909..0000000
+--- a/gradle/gradle-daemon-jvm.properties
++++ /dev/null
+@@ -1,13 +0,0 @@
+-#This file is generated by updateDaemonJvm
+-toolchainUrl.FREE_BSD.AARCH64=https\://api.foojay.io/disco/v3.0/ids/29ee363f71d060405f729a8f1b7f7aef/redirect
+-toolchainUrl.FREE_BSD.X86_64=https\://api.foojay.io/disco/v3.0/ids/ecd23fd7707c683afbcd6052998cb6a9/redirect
+-toolchainUrl.LINUX.AARCH64=https\://api.foojay.io/disco/v3.0/ids/29ee363f71d060405f729a8f1b7f7aef/redirect
+-toolchainUrl.LINUX.X86_64=https\://api.foojay.io/disco/v3.0/ids/ecd23fd7707c683afbcd6052998cb6a9/redirect
+-toolchainUrl.MAC_OS.AARCH64=https\://api.foojay.io/disco/v3.0/ids/10fc3bf1ee0001078a473afe6e43cfdb/redirect
+-toolchainUrl.MAC_OS.X86_64=https\://api.foojay.io/disco/v3.0/ids/9c55677aff3966382f3d853c0959bfb2/redirect
+-toolchainUrl.UNIX.AARCH64=https\://api.foojay.io/disco/v3.0/ids/29ee363f71d060405f729a8f1b7f7aef/redirect
+-toolchainUrl.UNIX.X86_64=https\://api.foojay.io/disco/v3.0/ids/ecd23fd7707c683afbcd6052998cb6a9/redirect
+-toolchainUrl.WINDOWS.AARCH64=https\://api.foojay.io/disco/v3.0/ids/248ffb1098f61659502d0c09aa348294/redirect
+-toolchainUrl.WINDOWS.X86_64=https\://api.foojay.io/disco/v3.0/ids/ac151d55def6b6a9a159dc4cb4642851/redirect
+-toolchainVendor=JETBRAINS
+-toolchainVersion=21
